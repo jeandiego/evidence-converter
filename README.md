@@ -4,62 +4,71 @@ Desktop app for converting `.mov` and `.mp4` files to GIFs. Built with Tauri, Re
 
 ## For teammates (install)
 
-Download the latest release for your platform from [GitHub Releases](../../releases):
+Share the built installers directly — no Homebrew, ffmpeg, or PATH setup required.
 
-- **macOS:** open the `.dmg`, drag the app to Applications
-- **Windows:** run the `.msi` or `.exe` installer
+- **macOS:** open `evidence-cvt_*_aarch64.dmg`, drag the app to Applications
+- **Windows:** run the `evidence-cvt_*_x64-setup.exe` NSIS installer
 
-No Homebrew, ffmpeg, or PATH setup required — ffmpeg is bundled inside the app.
+## Local release builds (maintainers)
 
-## For developers
-
-### Prerequisites
-
-- [Bun](https://bun.sh)
-- [Rust stable](https://rustup.rs)
-- macOS: Xcode command line tools (`unzip` for the download script)
-- Windows: PowerShell (used by the download script)
-
-### Setup
+### macOS `.dmg`
 
 ```bash
 bun install
+bun run tauri:build:mac
 ```
+
+Output:
+
+- `src-tauri/target/release/bundle/dmg/evidence-cvt_0.1.0_aarch64.dmg`
+
+### Windows `.exe` from macOS (cross-compile)
+
+MSI installers require a Windows machine (WiX). From macOS you can build the NSIS `.exe` installer instead.
+
+One-time setup:
+
+```bash
+brew install nsis llvm
+rustup target add x86_64-pc-windows-msvc
+cargo install --locked cargo-xwin
+```
+
+Build:
+
+```bash
+bun run tauri:build:windows
+```
+
+Output:
+
+- `src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/evidence-cvt_*_x64-setup.exe`
+
+Build both platforms:
+
+```bash
+bun run tauri:build:all
+```
+
+Ready-to-share copies are also written to `dist/releases/` when you run the build commands above.
 
 ### Development
 
-Uses system ffmpeg from PATH when bundled sidecars are not present (e.g. before first download):
+Uses system ffmpeg from PATH when bundled sidecars are missing:
 
 ```bash
 bun tauri dev
 ```
 
-### Production build
-
-Downloads platform-specific ffmpeg/ffprobe sidecars, then builds the installer:
+Fetch sidecars only:
 
 ```bash
-bun run tauri:build
+bun run download-ffmpeg:mac
+bun run download-ffmpeg:windows
+bun run download-ffmpeg:all
 ```
 
-To fetch sidecars only:
-
-```bash
-bun run download-ffmpeg
-```
-
-Sidecar binaries are written to `src-tauri/binaries/` and are not committed to git.
-
-### Releases (maintainers)
-
-Push a version tag to trigger CI builds for macOS and Windows:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-CI uploads `.dmg`, `.app`, `.msi`, and `.exe` artifacts and attaches them to the GitHub Release.
+Sidecar binaries live in `src-tauri/binaries/` and are not committed to git.
 
 ## Third-party licenses
 

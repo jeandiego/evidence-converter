@@ -8,8 +8,14 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "download-ffmpeg": "node scripts/download-ffmpeg.mjs",
+    "download-ffmpeg:mac": "node scripts/download-ffmpeg.mjs",
+    "download-ffmpeg:windows": "node scripts/download-ffmpeg.mjs --target x86_64-pc-windows-msvc",
+    "download-ffmpeg:all": "node scripts/download-ffmpeg.mjs --all-targets",
     "tauri": "tauri",
-    "tauri:build": "bun run download-ffmpeg && bun tauri build"
+    "tauri:build": "bun run download-ffmpeg:mac && bun tauri build",
+    "tauri:build:mac": "bun run download-ffmpeg:mac && bun tauri build && node scripts/collect-releases.mjs",
+    "tauri:build:windows": "bun run download-ffmpeg:windows && bun tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis && node scripts/collect-releases.mjs",
+    "tauri:build:all": "bun run download-ffmpeg:all && bun run tauri:build:mac && bun run tauri:build:windows"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

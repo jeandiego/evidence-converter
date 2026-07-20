@@ -116,15 +116,25 @@ function installTarget(targetTriple) {
 
 function main() {
   const allTargets = process.argv.includes("--all-targets");
-  const targets = allTargets ? Object.keys(TARGETS) : [hostTargetTriple()];
+  const targetFlagIndex = process.argv.indexOf("--target");
+  const explicitTarget =
+    targetFlagIndex >= 0 ? process.argv[targetFlagIndex + 1] : undefined;
 
-  if (!allTargets && !TARGETS[targets[0]]) {
-    throw new Error(
-      `Unsupported host target triple: ${targets[0]}. Supported: ${Object.keys(TARGETS).join(", ")}`,
-    );
+  let targets;
+  if (allTargets) {
+    targets = Object.keys(TARGETS);
+  } else if (explicitTarget) {
+    targets = [explicitTarget];
+  } else {
+    targets = [hostTargetTriple()];
   }
 
   for (const targetTriple of targets) {
+    if (!TARGETS[targetTriple]) {
+      throw new Error(
+        `Unsupported target triple: ${targetTriple}. Supported: ${Object.keys(TARGETS).join(", ")}`,
+      );
+    }
     installTarget(targetTriple);
   }
 }

@@ -28,7 +28,7 @@ fn sidecar_executable_path(name: &str) -> Result<PathBuf, String> {
         exe_dir
     };
 
-    let command_path = base_dir.join(name);
+    let mut command_path = base_dir.join(name);
 
     #[cfg(windows)]
     if command_path.extension().is_none() {
