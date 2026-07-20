@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "macos-tray",
+  "description": "macOS menu bar tray window permissions",
+  "windows": ["main"],
+  "platforms": ["macOS"],
+  "permissions": [
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-effects",
+    "core:window:allow-is-visible",
+    "core:window:allow-set-visible-on-all-workspaces",
+    "positioner:default"
+  ]
+}

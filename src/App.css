@@ -25,6 +25,15 @@
   -webkit-font-smoothing: antialiased;
 }
 
+html.platform-macos {
+  --bg: rgba(26, 29, 35, 0.55);
+  --bg-elevated: rgba(35, 39, 47, 0.72);
+  --bg-drop: rgba(30, 34, 41, 0.68);
+  --border: rgba(255, 255, 255, 0.1);
+  --border-active: rgba(122, 163, 245, 0.85);
+  background: transparent;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -68,8 +77,7 @@ body {
 .tabs {
   display: flex;
   gap: 0.35rem;
-  padding: 0.25rem;
-  background: var(--bg-elevated);
+  padding: 0.1rem;
   border: 1px solid var(--border);
   border-radius: var(--radius);
 }
@@ -89,8 +97,8 @@ body {
 }
 
 .tab-active {
-  background: var(--bg);
-  border-color: var(--border);
+  background: rgba(230, 230, 230, 0.05);
+  /* border-color: var(--border); */
   color: var(--text);
 }
 
@@ -127,7 +135,7 @@ body {
   align-items: center;
   gap: 0.75rem;
   padding: 0.75rem;
-  background: var(--bg-elevated);
+  /* background: var(--bg-elevated); */
   border: 1px solid var(--border);
   border-radius: var(--radius);
 }
@@ -163,7 +171,7 @@ body {
   gap: 0.4rem;
   min-height: 140px;
   padding: 1.5rem;
-  background: var(--bg-drop);
+  /* background: var(--bg-drop); */
   border: 1.5px dashed var(--border);
   border-radius: calc(var(--radius) + 2px);
   transition: border-color 0.15s, background 0.15s;
@@ -223,7 +231,8 @@ body {
 
 .progress-bar {
   height: 8px;
-  background: var(--bg-drop);
+  border: 1px solid var(--border);
+  /* background: var(--bg-drop); */
   border-radius: 999px;
   overflow: hidden;
 }
@@ -240,7 +249,7 @@ body {
   flex-direction: column;
   gap: 1rem;
   padding: 1rem;
-  background: var(--bg-elevated);
+  /* background: var(--bg-elevated); */
   border: 1px solid var(--border);
   border-radius: var(--radius);
 }
@@ -495,4 +504,93 @@ button.primary:hover:not(:disabled) {
 
 button.secondary {
   background: transparent;
+}
+
+html.platform-macos,
+html.platform-macos body,
+html.platform-macos #root {
+  background: transparent;
+}
+
+html.platform-macos body {
+  background: none;
+}
+
+html.platform-macos .app {
+  max-width: none;
+  margin: 0;
+  min-height: 100vh;
+  padding: 0.75rem 1rem 1.25rem;
+}
+
+html.platform-macos .app-macos {
+  gap: 0.75rem;
+}
+
+.macos-chrome {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: -0.15rem 0 0.15rem;
+  padding: 0.15rem 0.1rem 0.35rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.macos-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: rgba(232, 234, 237, 0.92);
+  letter-spacing: -0.01em;
+  user-select: none;
+}
+
+.macos-close {
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(232, 234, 237, 0.85);
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.macos-close:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+html.platform-macos .header h1 {
+  font-size: 1.15rem;
+}
+
+html.platform-macos .subtitle {
+  font-size: 0.82rem;
+}
+
+html.platform-macos .tabs,
+html.platform-macos .dir-row,
+html.platform-macos .dropzone,
+html.platform-macos .progress-panel,
+html.platform-macos .prefs,
+html.platform-macos .queue-item {
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+}
+
+html.platform-macos .dropzone-active {
+  background: rgba(91, 141, 239, 0.14);
+}
+
+html.platform-macos .banner-error {
+  background: rgba(212, 101, 101, 0.18);
+  border-color: rgba(212, 101, 101, 0.35);
+}
+
+html.platform-macos .banner-ok {
+  background: rgba(61, 154, 106, 0.16);
+  border-color: rgba(61, 154, 106, 0.32);
 }

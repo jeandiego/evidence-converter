@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "evidence-cvt",
+  "productName": "Evidence Converter",
   "version": "0.1.0",
   "identifier": "files-converter",
   "build": {
@@ -10,13 +10,21 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "Evidence GIF Converter",
-        "width": 720,
-        "height": 780,
-        "minWidth": 480,
-        "minHeight": 560
+        "width": 420,
+        "height": 620,
+        "minWidth": 380,
+        "minHeight": 520,
+        "decorations": false,
+        "transparent": true,
+        "backgroundColor": [0, 0, 0, 0],
+        "titleBarStyle": "Transparent",
+        "hiddenTitle": true,
+        "shadow": true,
+        "visibleOnAllWorkspaces": true
       }
     ],
     "security": {

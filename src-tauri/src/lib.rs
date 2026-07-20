@@ -521,6 +521,99 @@ fn emit_file_finished(
     );
 }
 
+#[cfg(target_os = "macos")]
+fn configure_macos_window(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    use tauri::window::{Color, Effect, EffectState, EffectsBuilder};
+
+    window.set_background_color(Some(Color(0, 0, 0, 0)))?;
+    window.set_effects(
+        EffectsBuilder::new()
+            .effect(Effect::HudWindow)
+            .state(EffectState::Active)
+            .radius(12.0)
+            .build(),
+    )?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn toggle_macos_panel(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    use tauri_plugin_positioner::{Position, WindowExt};
+
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+
+    if window.is_visible().unwrap_or(false) {
+        let _ = window.hide();
+        return;
+    }
+
+    let _ = window.as_ref().window().move_window(Position::TrayCenter);
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+#[cfg(target_os = "macos")]
+fn load_tray_icon() -> tauri::Result<tauri::image::Image<'static>> {
+    tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))
+}
+
+#[cfg(target_os = "macos")]
+fn setup_macos_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::{
+        Manager,
+        menu::{Menu, MenuItem},
+        tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    };
+
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&quit])?;
+
+    if let Some(window) = app.get_webview_window("main") {
+        configure_macos_window(&window)?;
+        let _ = window.set_visible_on_all_workspaces(true);
+        let _ = window.hide();
+    }
+
+    let _ = app.handle().set_dock_visibility(false)?;
+
+    let icon = load_tray_icon()?;
+
+    let tray = TrayIconBuilder::new()
+        .icon(icon)
+        .icon_as_template(true)
+        .tooltip("Evidence GIF Converter")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| {
+            if event.id() == "quit" {
+                app.exit(0);
+            }
+        })
+        .on_tray_icon_event(|tray, event| {
+            tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Down,
+                ..
+            } = event
+            {
+                toggle_macos_panel(tray.app_handle());
+            }
+        })
+        .build(app)?;
+
+    tray.with_inner_tray_icon(|inner| {
+        inner.set_show_menu_on_left_click(false);
+        inner.set_show_menu_on_right_click(true);
+    })?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -528,9 +621,30 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            #[cfg(target_os = "macos")]
+            {
+                app.handle().plugin(tauri_plugin_positioner::init())?;
+                setup_macos_tray(app)?;
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![check_ffmpeg, convert_videos])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                api.prevent_exit();
+            }
+        });
 }
 
 #[cfg(test)]

@@ -4,6 +4,11 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Store } from "@tauri-apps/plugin-store";
+import {
+  hideMacosWindow,
+  initMacosWindow,
+  isMacosPlatform,
+} from "./platform/macosWindow";
 import "./App.css";
 
 type TabId = "convert" | "preferences";
@@ -114,6 +119,7 @@ function App() {
   const [dropActive, setDropActive] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [store, setStore] = useState<Store | null>(null);
+  const [isMacos] = useState(isMacosPlatform);
 
   const filterPreview = useMemo(
     () => buildGifFilterPreview(ffmpegConfig),
@@ -125,6 +131,10 @@ function App() {
       `.mov and .mp4 · fps ${ffmpegConfig.fps} · width ${ffmpegConfig.width} · ${ffmpegConfig.maxColors} colors`,
     [ffmpegConfig],
   );
+
+  useEffect(() => {
+    initMacosWindow().catch(console.error);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -454,7 +464,23 @@ function App() {
   const progressPercent = progress ? overallPercent(progress) : 0;
 
   return (
-    <main className="app">
+    <main className={`app${isMacos ? " app-macos" : ""}`}>
+      {isMacos && (
+        <div className="macos-chrome" data-tauri-drag-region>
+          <span className="macos-title">Evidence GIF Converter</span>
+          <button
+            type="button"
+            className="macos-close"
+            aria-label="Close panel"
+            onClick={() => {
+              hideMacosWindow().catch(console.error);
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       <header className="header">
         <h1>Evidence GIF Converter</h1>
         <p className="subtitle">
