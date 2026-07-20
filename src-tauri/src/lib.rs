@@ -6,6 +6,61 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
+use tauri_plugin_shell::ShellExt;
+
+const TOOL_UNAVAILABLE: &str =
+    "Bundled ffmpeg is unavailable. Reinstall the app or contact support.";
+
+struct ToolPaths {
+    ffmpeg: PathBuf,
+    ffprobe: PathBuf,
+}
+
+fn sidecar_executable_path(name: &str) -> Result<PathBuf, String> {
+    let exe_path = tauri::utils::platform::current_exe()
+        .map_err(|e| format!("Failed to locate app executable: {e}"))?;
+    let exe_dir = exe_path
+        .parent()
+        .ok_or_else(|| "App executable has no parent directory".to_string())?;
+    let base_dir = if exe_dir.ends_with("deps") {
+        exe_dir.parent().unwrap_or(exe_dir)
+    } else {
+        exe_dir
+    };
+
+    let command_path = base_dir.join(name);
+
+    #[cfg(windows)]
+    if command_path.extension().is_none() {
+        command_path.set_extension("exe");
+    }
+
+    if command_path.is_file() {
+        Ok(command_path)
+    } else {
+        Err(format!(
+            "Bundled {name} not found at {}",
+            command_path.display()
+        ))
+    }
+}
+
+fn resolve_tool(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
+    let _ = app.shell().sidecar(name);
+
+    if let Ok(path) = sidecar_executable_path(name) {
+        return Ok(path);
+    }
+
+    which::which(name).map_err(|_| TOOL_UNAVAILABLE.to_string())
+}
+
+fn resolve_tools(app: &AppHandle) -> Result<ToolPaths, String> {
+    Ok(ToolPaths {
+        ffmpeg: resolve_tool(app, "ffmpeg")?,
+        ffprobe: resolve_tool(app, "ffprobe")?,
+    })
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -130,8 +185,8 @@ fn truncate_stderr(stderr: &str, max_chars: usize) -> String {
     format!("…{}", &trimmed[start..])
 }
 
-fn probe_duration_secs(path: &str) -> Option<f64> {
-    let output = Command::new("ffprobe")
+fn probe_duration_secs(tools: &ToolPaths, path: &str) -> Option<f64> {
+    let output = Command::new(&tools.ffprobe)
         .args([
             "-v",
             "error",
@@ -167,6 +222,7 @@ fn emit_progress(app: Option<&AppHandle>, payload: ConvertProgress) {
 }
 
 fn run_ffmpeg_with_progress(
+    tools: &ToolPaths,
     app: Option<&AppHandle>,
     input_path: &str,
     output_path: &str,
@@ -175,7 +231,7 @@ fn run_ffmpeg_with_progress(
     total: usize,
     name: &str,
 ) -> Result<(), String> {
-    let mut child = Command::new("ffmpeg")
+    let mut child = Command::new(&tools.ffmpeg)
         .args([
             "-y",
             "-i",
@@ -209,7 +265,7 @@ fn run_ffmpeg_with_progress(
     let stdout = child.stdout.take().ok_or("Failed to capture ffmpeg stdout")?;
     let reader = BufReader::new(stdout);
 
-    let duration_secs = probe_duration_secs(input_path);
+    let duration_secs = probe_duration_secs(tools, input_path);
     let mut last_emit = Instant::now() - Duration::from_millis(500);
     let mut last_percent = -1.0f64;
 
@@ -276,33 +332,39 @@ fn run_ffmpeg_with_progress(
 }
 
 #[tauri::command]
-fn check_ffmpeg() -> FfmpegStatus {
-    match Command::new("ffmpeg").arg("-version").output() {
-        Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let first_line = stdout.lines().next().unwrap_or("ffmpeg available").to_string();
-            FfmpegStatus {
-                available: true,
-                message: first_line,
+fn check_ffmpeg(app: AppHandle) -> FfmpegStatus {
+    match resolve_tool(&app, "ffmpeg") {
+        Ok(path) => match Command::new(&path).arg("-version").output() {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let first_line = stdout.lines().next().unwrap_or("ffmpeg available").to_string();
+                FfmpegStatus {
+                    available: true,
+                    message: first_line,
+                }
             }
-        }
-        Ok(output) => FfmpegStatus {
-            available: false,
-            message: format!(
-                "ffmpeg exited with {}. Install via Homebrew: brew install ffmpeg",
-                output.status
-            ),
+            Ok(output) => FfmpegStatus {
+                available: false,
+                message: format!(
+                    "ffmpeg exited with {}. {}",
+                    output.status, TOOL_UNAVAILABLE
+                ),
+            },
+            Err(error) => FfmpegStatus {
+                available: false,
+                message: format!("Failed to run ffmpeg: {error}. {TOOL_UNAVAILABLE}"),
+            },
         },
-        Err(_) => FfmpegStatus {
+        Err(message) => FfmpegStatus {
             available: false,
-            message: "ffmpeg not found on PATH. Install via Homebrew: brew install ffmpeg"
-                .to_string(),
+            message,
         },
     }
 }
 
 fn convert_videos_inner(
     app: AppHandle,
+    tools: ToolPaths,
     paths: Vec<String>,
     output_dir: String,
     config: FfmpegConfig,
@@ -368,6 +430,7 @@ fn convert_videos_inner(
         let output_path_str = output_path.to_string_lossy().to_string();
 
         match run_ffmpeg_with_progress(
+            &tools,
             Some(&app),
             &path_str,
             &output_path_str,
@@ -429,8 +492,9 @@ async fn convert_videos(
         return Err("No files to convert".to_string());
     }
 
+    let tools = resolve_tools(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        convert_videos_inner(app, paths, output_dir, config);
+        convert_videos_inner(app, tools, paths, output_dir, config);
     });
 
     Ok(())
@@ -463,6 +527,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![check_ffmpeg, convert_videos])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -534,7 +599,12 @@ mod tests {
 
         let filter = build_gif_filter(&FfmpegConfig::default());
         let output_path = out.join("clip.gif");
+        let tools = ToolPaths {
+            ffmpeg: which::which("ffmpeg").expect("ffmpeg required for test"),
+            ffprobe: which::which("ffprobe").expect("ffprobe required for test"),
+        };
         run_ffmpeg_with_progress(
+            &tools,
             None,
             input.to_str().unwrap(),
             output_path.to_str().unwrap(),
