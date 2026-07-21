@@ -1,4 +1,8 @@
+mod businessmap;
+
+use businessmap::BusinessmapConfig;
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -138,6 +142,34 @@ struct ConvertFileFinished {
 struct ConvertBatchFinished {
     ok: usize,
     failed: usize,
+    destination: String,
+    card_id: Option<u64>,
+    card_url: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConvertFileUploading {
+    index: usize,
+    total: usize,
+    name: String,
+    path: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum ConvertDestination {
+    Local,
+    Businessmap,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BusinessmapOptions {
+    card_url: String,
+    api_key: String,
+    base_url: String,
+    comment_template: String,
 }
 
 fn validate_config(config: &FfmpegConfig) -> Result<(), String> {
@@ -366,14 +398,32 @@ fn convert_videos_inner(
     app: AppHandle,
     tools: ToolPaths,
     paths: Vec<String>,
-    output_dir: String,
+    output_dir: PathBuf,
     config: FfmpegConfig,
+    destination: ConvertDestination,
+    businessmap: Option<BusinessmapOptions>,
 ) {
-    let out_dir = PathBuf::from(&output_dir);
     let filter = build_gif_filter(&config);
     let total = paths.len();
     let mut ok_count = 0usize;
     let mut failed_count = 0usize;
+
+    let bm_config = if destination == ConvertDestination::Businessmap {
+        let options = businessmap.as_ref().expect("BusinessMap options required");
+        Some(BusinessmapConfig {
+            base_url: options.base_url.clone(),
+            api_key: options.api_key.clone(),
+            card_url: options.card_url.clone(),
+            comment_template: options.comment_template.clone(),
+        })
+    } else {
+        None
+    };
+
+    let card_id = bm_config
+        .as_ref()
+        .and_then(|cfg| businessmap::parse_card_id(&cfg.card_url).ok());
+    let card_url = bm_config.as_ref().map(|cfg| cfg.card_url.clone());
 
     let _ = app.emit(
         "convert-batch-started",
@@ -426,10 +476,10 @@ fn convert_videos_inner(
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("output");
-        let output_path = out_dir.join(format!("{stem}.gif"));
+        let output_path = output_dir.join(format!("{stem}.gif"));
         let output_path_str = output_path.to_string_lossy().to_string();
 
-        match run_ffmpeg_with_progress(
+        let convert_result = run_ffmpeg_with_progress(
             &tools,
             Some(&app),
             &path_str,
@@ -438,7 +488,52 @@ fn convert_videos_inner(
             index,
             total,
             &name,
-        ) {
+        );
+
+        match convert_result {
+            Ok(()) if destination == ConvertDestination::Businessmap => {
+                let bm = bm_config.as_ref().expect("BusinessMap config");
+                let card_id = businessmap::parse_card_id(&bm.card_url).unwrap_or(0);
+                let gif_name = output_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("evidence.gif")
+                    .to_string();
+
+                let _ = app.emit(
+                    "convert-file-uploading",
+                    ConvertFileUploading {
+                        index,
+                        total,
+                        name: name.clone(),
+                        path: path_str.clone(),
+                    },
+                );
+
+                match post_gif_to_businessmap(bm, card_id, &gif_name, &output_path) {
+                    Ok(()) => {
+                        cleanup_temp_gif(&output_path, &output_dir);
+                        ok_count += 1;
+                        let result = ConvertResult {
+                            name: name.clone(),
+                            ok: true,
+                            error: None,
+                            output_path: None,
+                        };
+                        emit_file_finished(&app, index, total, &path_str, &result);
+                    }
+                    Err(error) => {
+                        failed_count += 1;
+                        let result = ConvertResult {
+                            name: name.clone(),
+                            ok: false,
+                            error: Some(error),
+                            output_path: Some(output_path_str),
+                        };
+                        emit_file_finished(&app, index, total, &path_str, &result);
+                    }
+                }
+            }
             Ok(()) => {
                 ok_count += 1;
                 let result = ConvertResult {
@@ -462,39 +557,141 @@ fn convert_videos_inner(
         }
     }
 
+    if destination == ConvertDestination::Businessmap {
+        cleanup_temp_dir_if_empty(&output_dir);
+    }
+
+    let destination_label = if destination == ConvertDestination::Businessmap {
+        "businessmap".to_string()
+    } else {
+        "local".to_string()
+    };
+
     let _ = app.emit(
         "convert-batch-finished",
         ConvertBatchFinished {
             ok: ok_count,
             failed: failed_count,
+            destination: destination_label,
+            card_id,
+            card_url,
         },
     );
+}
+
+fn post_gif_to_businessmap(
+    config: &BusinessmapConfig,
+    card_id: u64,
+    gif_name: &str,
+    gif_path: &Path,
+) -> Result<(), String> {
+    let bytes = fs::read(gif_path).map_err(|e| format!("Failed to read GIF: {e}"))?;
+    let link = businessmap::upload_file(&config.base_url, &config.api_key, gif_name, &bytes)?;
+    let comment = businessmap::render_comment_template(&config.comment_template, gif_name);
+    businessmap::post_comment_with_attachment(
+        &config.base_url,
+        &config.api_key,
+        card_id,
+        &comment,
+        gif_name,
+        &link,
+    )
+}
+
+fn cleanup_temp_gif(gif_path: &Path, temp_dir: &Path) {
+    let _ = fs::remove_file(gif_path);
+    cleanup_temp_dir_if_empty(temp_dir);
+}
+
+fn cleanup_temp_dir_if_empty(dir: &Path) {
+    if !dir.is_dir() {
+        return;
+    }
+    let is_empty = fs::read_dir(dir)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false);
+    if is_empty {
+        let _ = fs::remove_dir(dir);
+        if let Some(parent) = dir.parent() {
+            if parent.file_name().and_then(|n| n.to_str()) == Some("evidence-cvt") {
+                let _ = fs::remove_dir(parent);
+            }
+        }
+    }
+}
+
+fn create_batch_output_dir(destination: ConvertDestination) -> Result<PathBuf, String> {
+    match destination {
+        ConvertDestination::Local => Err("Local destination requires an output directory".to_string()),
+        ConvertDestination::Businessmap => {
+            let batch_id = format!("{}", std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0));
+            let dir = std::env::temp_dir()
+                .join("evidence-cvt")
+                .join(batch_id);
+            fs::create_dir_all(&dir).map_err(|e| format!("Failed to create temp directory: {e}"))?;
+            Ok(dir)
+        }
+    }
+}
+
+#[tauri::command]
+fn test_businessmap_connection(base_url: String, api_key: String) -> Result<String, String> {
+    businessmap::test_connection(&base_url, &api_key)
 }
 
 #[tauri::command]
 async fn convert_videos(
     app: AppHandle,
     paths: Vec<String>,
-    output_dir: String,
+    output_dir: Option<String>,
+    destination: ConvertDestination,
+    businessmap: Option<BusinessmapOptions>,
     config: FfmpegConfig,
 ) -> Result<(), String> {
     validate_config(&config)?;
-
-    let out_dir = PathBuf::from(&output_dir);
-    if !out_dir.is_dir() {
-        return Err(format!(
-            "Output directory does not exist or is not a folder: {}",
-            output_dir
-        ));
-    }
 
     if paths.is_empty() {
         return Err("No files to convert".to_string());
     }
 
+    let out_dir = match destination {
+        ConvertDestination::Local => {
+            let dir = output_dir.ok_or_else(|| "Output directory is required".to_string())?;
+            let path = PathBuf::from(&dir);
+            if !path.is_dir() {
+                return Err(format!(
+                    "Output directory does not exist or is not a folder: {dir}"
+                ));
+            }
+            path
+        }
+        ConvertDestination::Businessmap => {
+            let options = businessmap
+                .as_ref()
+                .ok_or_else(|| "BusinessMap settings are required".to_string())?;
+            businessmap::parse_card_id(&options.card_url)?;
+            if options.api_key.trim().is_empty() {
+                return Err("BusinessMap API key is required".to_string());
+            }
+            create_batch_output_dir(destination)?
+        }
+    };
+
     let tools = resolve_tools(&app)?;
+    let bm_options = businessmap;
     tauri::async_runtime::spawn_blocking(move || {
-        convert_videos_inner(app, tools, paths, output_dir, config);
+        convert_videos_inner(
+            app,
+            tools,
+            paths,
+            out_dir,
+            config,
+            destination,
+            bm_options,
+        );
     });
 
     Ok(())
@@ -655,7 +852,11 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .invoke_handler(tauri::generate_handler![check_ffmpeg, convert_videos])
+        .invoke_handler(tauri::generate_handler![
+            check_ffmpeg,
+            convert_videos,
+            test_businessmap_connection
+        ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|_app, event| {

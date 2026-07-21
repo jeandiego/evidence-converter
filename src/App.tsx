@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Store } from "@tauri-apps/plugin-store";
 import {
   hideMacosWindow,
@@ -12,7 +13,8 @@ import {
 import "./App.css";
 
 type TabId = "convert" | "preferences";
-type QueueStatus = "pending" | "converting" | "done" | "error";
+type DestinationId = "local" | "businessmap";
+type QueueStatus = "pending" | "converting" | "uploading" | "done" | "error";
 
 type QueueItem = {
   path: string;
@@ -34,7 +36,20 @@ type FfmpegConfig = {
   maxColors: number;
 };
 
-type ConvertBatchFinished = { ok: number; failed: number };
+type ConvertBatchFinished = {
+  ok: number;
+  failed: number;
+  destination: DestinationId;
+  cardId?: number | null;
+  cardUrl?: string | null;
+};
+
+type ConvertFileUploading = {
+  index: number;
+  total: number;
+  name: string;
+  path: string;
+};
 
 type ConvertProgressState = {
   active: boolean;
@@ -73,7 +88,13 @@ const OUTPUT_DIR_KEY = "outputDir";
 const FFMPEG_FPS_KEY = "ffmpegFps";
 const FFMPEG_WIDTH_KEY = "ffmpegWidth";
 const FFMPEG_MAX_COLORS_KEY = "ffmpegMaxColors";
+const BM_API_KEY = "businessmapApiKey";
+const BM_BASE_URL_KEY = "businessmapBaseUrl";
+const BM_COMMENT_TEMPLATE_KEY = "businessmapCommentTemplate";
+const DEFAULT_BM_BASE_URL = "https://dasa.businessmap.io";
+const DEFAULT_BM_COMMENT_TEMPLATE = "{filename}";
 const VIDEO_EXT = /\.(mov|mp4)$/i;
+const CARD_URL_PATTERN = /\/cards\/(\d+)/;
 
 const DEFAULT_FFMPEG_CONFIG: FfmpegConfig = {
   fps: 10,
@@ -84,6 +105,22 @@ const DEFAULT_FFMPEG_CONFIG: FfmpegConfig = {
 function fileName(path: string): string {
   const parts = path.split(/[/\\]/);
   return parts[parts.length - 1] || path;
+}
+
+function parseCardIdFromUrl(url: string): number | null {
+  const match = url.trim().match(CARD_URL_PATTERN);
+  if (!match) return null;
+  const id = Number.parseInt(match[1], 10);
+  return Number.isNaN(id) ? null : id;
+}
+
+function cardCommentsUrl(cardUrl: string, cardId: number, baseUrl: string): string {
+  const trimmed = cardUrl.trim();
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    const base = trimmed.split("#")[0].replace(/\/$/, "");
+    return base.includes("/comments") ? base : `${base}/comments`;
+  }
+  return `${baseUrl.replace(/\/$/, "")}/ctrl_board/0/cards/${cardId}/comments`;
 }
 
 function isVideoPath(path: string): boolean {
@@ -120,6 +157,14 @@ function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [store, setStore] = useState<Store | null>(null);
   const [isMacos] = useState(isMacosPlatform);
+  const [destination, setDestination] = useState<DestinationId>("local");
+  const [cardUrl, setCardUrl] = useState("");
+  const [bmApiKey, setBmApiKey] = useState("");
+  const [bmBaseUrl, setBmBaseUrl] = useState(DEFAULT_BM_BASE_URL);
+  const [bmCommentTemplate, setBmCommentTemplate] = useState(DEFAULT_BM_COMMENT_TEMPLATE);
+  const [bmTestMessage, setBmTestMessage] = useState<string | null>(null);
+  const [bmTesting, setBmTesting] = useState(false);
+  const [lastCardLink, setLastCardLink] = useState<string | null>(null);
 
   const filterPreview = useMemo(
     () => buildGifFilterPreview(ffmpegConfig),
@@ -163,6 +208,13 @@ function App() {
           maxColors: savedMaxColors ?? DEFAULT_FFMPEG_CONFIG.maxColors,
         }),
       );
+
+      const savedBmApiKey = await settings.get<string>(BM_API_KEY);
+      const savedBmBaseUrl = await settings.get<string>(BM_BASE_URL_KEY);
+      const savedBmTemplate = await settings.get<string>(BM_COMMENT_TEMPLATE_KEY);
+      if (savedBmApiKey) setBmApiKey(savedBmApiKey);
+      if (savedBmBaseUrl) setBmBaseUrl(savedBmBaseUrl);
+      if (savedBmTemplate) setBmCommentTemplate(savedBmTemplate);
     }
 
     init().catch((err) => {
@@ -236,6 +288,19 @@ function App() {
       );
 
       unlisteners.push(
+        await listen<ConvertFileUploading>("convert-file-uploading", (event) => {
+          const { path } = event.payload;
+          setQueue((prev) =>
+            prev.map((item) =>
+              item.path === path
+                ? { ...item, status: "uploading", filePercent: undefined }
+                : item,
+            ),
+          );
+        }),
+      );
+
+      unlisteners.push(
         await listen<ConvertFileFinished>("convert-file-finished", (event) => {
           const { path, ok, error, outputPath } = event.payload;
           setQueue((prev) =>
@@ -264,14 +329,27 @@ function App() {
 
       unlisteners.push(
         await listen<ConvertBatchFinished>("convert-batch-finished", (event) => {
-          const { ok, failed } = event.payload;
+          const { ok, failed, destination: dest, cardId, cardUrl: finishedCardUrl } =
+            event.payload;
           setConverting(false);
           setProgress(null);
-          setNotice(
-            failed === 0
-              ? `Converted ${ok} file${ok === 1 ? "" : "s"}.`
-              : `Converted ${ok}, failed ${failed}.`,
-          );
+
+          if (dest === "businessmap") {
+            if (failed === 0) {
+              setNotice(`Posted ${ok} GIF${ok === 1 ? "" : "s"} to BusinessMap.`);
+            } else {
+              setNotice(`Posted ${ok}, failed ${failed} on BusinessMap.`);
+            }
+            if (finishedCardUrl && cardId) {
+              setLastCardLink(cardCommentsUrl(finishedCardUrl, cardId, bmBaseUrl));
+            }
+          } else {
+            setNotice(
+              failed === 0
+                ? `Converted ${ok} file${ok === 1 ? "" : "s"}.`
+                : `Converted ${ok}, failed ${failed}.`,
+            );
+          }
         }),
       );
     }
@@ -281,7 +359,7 @@ function App() {
     return () => {
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, []);
+  }, [bmBaseUrl]);
 
   const addPaths = useCallback((paths: string[]) => {
     const videos = paths.filter(isVideoPath);
@@ -359,6 +437,50 @@ function App() {
     [store],
   );
 
+  const persistBmSettings = useCallback(
+    async (next: {
+      apiKey?: string;
+      baseUrl?: string;
+      commentTemplate?: string;
+    }) => {
+      if (!store) return;
+      if (next.apiKey !== undefined) {
+        setBmApiKey(next.apiKey);
+        await store.set(BM_API_KEY, next.apiKey);
+      }
+      if (next.baseUrl !== undefined) {
+        setBmBaseUrl(next.baseUrl);
+        await store.set(BM_BASE_URL_KEY, next.baseUrl);
+      }
+      if (next.commentTemplate !== undefined) {
+        setBmCommentTemplate(next.commentTemplate);
+        await store.set(BM_COMMENT_TEMPLATE_KEY, next.commentTemplate);
+      }
+      await store.save();
+    },
+    [store],
+  );
+
+  async function testBusinessmapConnection() {
+    if (!bmApiKey.trim()) {
+      setBmTestMessage("Add your API key first.");
+      return;
+    }
+    setBmTesting(true);
+    setBmTestMessage(null);
+    try {
+      const username = await invoke<string>("test_businessmap_connection", {
+        baseUrl: bmBaseUrl.trim() || DEFAULT_BM_BASE_URL,
+        apiKey: bmApiKey.trim(),
+      });
+      setBmTestMessage(`Connected as ${username}.`);
+    } catch (err) {
+      setBmTestMessage(String(err));
+    } finally {
+      setBmTesting(false);
+    }
+  }
+
   async function chooseOutputDir() {
     const selected = await open({
       directory: true,
@@ -383,7 +505,9 @@ function App() {
   function clearQueue() {
     setQueue((prev) => {
       if (converting) {
-        return prev.filter((item) => item.status === "converting");
+        return prev.filter(
+          (item) => item.status === "converting" || item.status === "uploading",
+        );
       }
       return [];
     });
@@ -393,7 +517,7 @@ function App() {
   function removeItem(path: string) {
     setQueue((prev) => {
       const item = prev.find((entry) => entry.path === path);
-      if (!item || item.status === "converting") return prev;
+      if (!item || item.status === "converting" || item.status === "uploading") return prev;
       return prev.filter((entry) => entry.path !== path);
     });
   }
@@ -421,13 +545,29 @@ function App() {
   async function convert() {
     if (converting) return;
 
-    if (!outputDir) {
-      setNotice("Choose an output folder first.");
-      return;
-    }
     if (!ffmpeg?.available) {
       setNotice(ffmpeg?.message ?? "ffmpeg is not available.");
       return;
+    }
+
+    if (destination === "local" && !outputDir) {
+      setNotice("Choose an output folder first.");
+      return;
+    }
+
+    if (destination === "businessmap") {
+      if (!cardUrl.trim()) {
+        setNotice("Paste a BusinessMap card URL.");
+        return;
+      }
+      if (!parseCardIdFromUrl(cardUrl)) {
+        setNotice("Could not find card ID in URL. Use …/cards/402794/…");
+        return;
+      }
+      if (!bmApiKey.trim()) {
+        setNotice("Add your BusinessMap API key in Preferences.");
+        return;
+      }
     }
 
     const toConvert = queue.filter(
@@ -440,6 +580,7 @@ function App() {
 
     setConverting(true);
     setNotice(null);
+    setLastCardLink(null);
     setProgress({
       active: true,
       current: 0,
@@ -451,7 +592,17 @@ function App() {
     try {
       await invoke("convert_videos", {
         paths: toConvert.map((item) => item.path),
-        outputDir,
+        outputDir: destination === "local" ? outputDir : null,
+        destination,
+        businessmap:
+          destination === "businessmap"
+            ? {
+                cardUrl: cardUrl.trim(),
+                apiKey: bmApiKey.trim(),
+                baseUrl: bmBaseUrl.trim() || DEFAULT_BM_BASE_URL,
+                commentTemplate: bmCommentTemplate.trim() || DEFAULT_BM_COMMENT_TEMPLATE,
+              }
+            : null,
         config: clampConfig(ffmpegConfig),
       });
     } catch (err) {
@@ -460,6 +611,24 @@ function App() {
       setNotice(String(err));
     }
   }
+
+  const canConvert =
+    ffmpeg?.available &&
+    pendingCount > 0 &&
+    !converting &&
+    (destination === "local" ? Boolean(outputDir) : Boolean(cardUrl.trim() && bmApiKey.trim()));
+
+  const convertButtonLabel = converting
+    ? destination === "businessmap"
+      ? "Converting & posting…"
+      : "Converting…"
+    : pendingCount > 0
+      ? destination === "businessmap"
+        ? `Convert & post ${pendingCount}`
+        : `Convert ${pendingCount}`
+      : destination === "businessmap"
+        ? "Convert & post"
+        : "Convert";
 
   const progressPercent = progress ? overallPercent(progress) : 0;
 
@@ -518,17 +687,64 @@ function App() {
       )}
       {activeTab === "convert" && (
         <div className="tab-panel" role="tabpanel">
-          <section className="dir-row">
-            <div className="dir-info">
-              <span className="label">Save to</span>
-              <span className="dir-path" title={outputDir || undefined}>
-                {outputDir || "No folder selected"}
-              </span>
+          <section className="destination-row">
+            <span className="label">Destination</span>
+            <div className="destination-options" role="radiogroup" aria-label="Output destination">
+              <label className="destination-option">
+                <input
+                  type="radio"
+                  name="destination"
+                  value="local"
+                  checked={destination === "local"}
+                  disabled={converting}
+                  onChange={() => setDestination("local")}
+                />
+                Save locally
+              </label>
+              <label className="destination-option">
+                <input
+                  type="radio"
+                  name="destination"
+                  value="businessmap"
+                  checked={destination === "businessmap"}
+                  disabled={converting}
+                  onChange={() => setDestination("businessmap")}
+                />
+                Post to BusinessMap
+              </label>
             </div>
-            <button type="button" onClick={chooseOutputDir} disabled={converting}>
-              Change…
-            </button>
           </section>
+
+          {destination === "local" ? (
+            <section className="dir-row">
+              <div className="dir-info">
+                <span className="label">Save to</span>
+                <span className="dir-path" title={outputDir || undefined}>
+                  {outputDir || "No folder selected"}
+                </span>
+              </div>
+              <button type="button" onClick={chooseOutputDir} disabled={converting}>
+                Change…
+              </button>
+            </section>
+          ) : (
+            <section className="card-url-row">
+              <label className="card-url-field">
+                <span className="label">Card URL</span>
+                <input
+                  type="url"
+                  className="card-url-input"
+                  placeholder="https://dasa.businessmap.io/ctrl_board/99/cards/402794/comments/"
+                  value={cardUrl}
+                  disabled={converting}
+                  onChange={(event) => setCardUrl(event.target.value)}
+                />
+                <span className="pref-hint">
+                  Paste the card comments page URL — GIFs post as comment attachments.
+                </span>
+              </label>
+            </section>
+          )}
 
           <section
             className={`dropzone ${dropActive ? "dropzone-active" : ""}`}
@@ -543,12 +759,28 @@ function App() {
 
           {notice && <p className="notice">{notice}</p>}
 
+          {lastCardLink && (
+            <p className="notice notice-ok">
+              <button
+                type="button"
+                className="linkish"
+                onClick={() => {
+                  openUrl(lastCardLink).catch(console.error);
+                }}
+              >
+                Open card comments in browser
+              </button>
+            </p>
+          )}
+
           {progress?.active && (
             <section className="progress-panel" aria-live="polite">
               <div className="progress-header">
                 <span className="progress-label">
                   {progress.fileName
-                    ? `Converting ${progress.current + 1} of ${progress.total}: ${progress.fileName}`
+                    ? destination === "businessmap"
+                      ? `Processing ${progress.current + 1} of ${progress.total}: ${progress.fileName}`
+                      : `Converting ${progress.current + 1} of ${progress.total}: ${progress.fileName}`
                     : `Preparing ${progress.total} file${progress.total === 1 ? "" : "s"}…`}
                 </span>
                 <span className="progress-percent">{Math.round(progressPercent)}%</span>
@@ -601,7 +833,9 @@ function App() {
                       <span className="queue-status">
                         {item.status === "converting" && item.filePercent != null
                           ? `${Math.round(item.filePercent)}%`
-                          : item.status}
+                          : item.status === "uploading"
+                            ? "posting…"
+                            : item.status}
                       </span>
                     </div>
                     {item.status === "converting" && item.filePercent != null && (
@@ -625,7 +859,7 @@ function App() {
                         → {fileName(item.outputPath)}
                       </p>
                     )}
-                    {item.status !== "converting" && (
+                    {item.status !== "converting" && item.status !== "uploading" && (
                       <button
                         type="button"
                         className="linkish"
@@ -645,18 +879,9 @@ function App() {
               type="button"
               className="primary"
               onClick={convert}
-              disabled={
-                converting ||
-                !outputDir ||
-                !ffmpeg?.available ||
-                pendingCount === 0
-              }
+              disabled={!canConvert}
             >
-              {converting
-                ? "Converting…"
-                : pendingCount > 0
-                  ? `Convert ${pendingCount}`
-                  : "Convert"}
+              {convertButtonLabel}
             </button>
           </footer>
         </div>
@@ -722,8 +947,71 @@ function App() {
               onClick={resetPreferences}
               disabled={converting}
             >
-              Reset to defaults
+              Reset FFmpeg defaults
             </button>
+          </section>
+
+          <section className="prefs">
+            <h2>BusinessMap</h2>
+            <p className="prefs-intro">
+              API key from My Account → API. Used when destination is Post to BusinessMap.
+            </p>
+
+            <div className="prefs-grid">
+              <label className="pref-field pref-field-wide">
+                <span className="label">Base URL</span>
+                <input
+                  type="url"
+                  value={bmBaseUrl}
+                  disabled={converting}
+                  onChange={(event) => {
+                    void persistBmSettings({ baseUrl: event.target.value });
+                  }}
+                />
+              </label>
+
+              <label className="pref-field pref-field-wide">
+                <span className="label">API key</span>
+                <input
+                  type="password"
+                  value={bmApiKey}
+                  autoComplete="off"
+                  disabled={converting}
+                  onChange={(event) => {
+                    void persistBmSettings({ apiKey: event.target.value });
+                  }}
+                />
+              </label>
+
+              <label className="pref-field pref-field-wide">
+                <span className="label">Comment template</span>
+                <input
+                  type="text"
+                  value={bmCommentTemplate}
+                  disabled={converting}
+                  onChange={(event) => {
+                    void persistBmSettings({ commentTemplate: event.target.value });
+                  }}
+                />
+                <span className="pref-hint">Use {"{filename}"} for the GIF name.</span>
+              </label>
+            </div>
+
+            <div className="pref-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={testBusinessmapConnection}
+                disabled={converting || bmTesting || !bmApiKey.trim()}
+              >
+                {bmTesting ? "Testing…" : "Test connection"}
+              </button>
+              {bmTestMessage && (
+                <p className={`pref-test ${bmTestMessage.startsWith("Connected") ? "pref-test-ok" : "pref-test-error"}`}>
+                  {bmTestMessage}
+                </p>
+              )}
+            </div>
           </section>
         </div>
       )}

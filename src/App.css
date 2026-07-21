@@ -163,6 +163,83 @@ body {
   text-overflow: ellipsis;
 }
 
+.destination-row,
+.card-url-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.destination-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+}
+
+.destination-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.destination-option input {
+  accent-color: var(--accent);
+}
+
+.card-url-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.card-url-input {
+  width: 100%;
+  padding: 0.55rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+
+.card-url-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.notice-ok {
+  color: var(--ok);
+}
+
+.pref-field-wide {
+  grid-column: 1 / -1;
+}
+
+.pref-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.pref-test {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.pref-test-ok {
+  color: var(--ok);
+}
+
+.pref-test-error {
+  color: var(--error);
+}
+
 .dropzone {
   display: flex;
   flex-direction: column;
@@ -370,6 +447,10 @@ body {
   border-left-color: var(--accent);
 }
 
+.queue-item.status-uploading {
+  border-left-color: var(--warn);
+}
+
 .queue-item.status-done {
   border-left-color: var(--ok);
 }
@@ -411,6 +492,10 @@ body {
 
 .status-converting .queue-status {
   color: var(--accent);
+}
+
+.status-uploading .queue-status {
+  color: var(--warn);
 }
 
 .queue-progress-bar {
