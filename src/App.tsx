@@ -467,7 +467,12 @@ function App() {
     <main className={`app${isMacos ? " app-macos" : ""}`}>
       {isMacos && (
         <div className="macos-chrome" data-tauri-drag-region>
-          <span className="macos-title">Evidence GIF Converter</span>
+        <header className="header">
+        <h1 className="macos-title">Evidence GIF Converter</h1>
+        <p className="subtitle">
+          Drop .mov / .mp4 evidence videos → GIFs
+        </p>
+      </header>
           <button
             type="button"
             className="macos-close"
@@ -476,17 +481,14 @@ function App() {
               hideMacosWindow().catch(console.error);
             }}
           >
-            ×
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" 
+              width="24" 
+              height="24"
+              fill="rgba(255,255,255,1)"><path d="M11.9997 10.5865L16.9495 5.63672L18.3637 7.05093L13.4139 12.0007L18.3637 16.9504L16.9495 18.3646L11.9997 13.4149L7.04996 18.3646L5.63574 16.9504L10.5855 12.0007L5.63574 7.05093L7.04996 5.63672L11.9997 10.5865Z"></path></svg>
           </button>
         </div>
+        
       )}
-
-      <header className="header">
-        <h1>Evidence GIF Converter</h1>
-        <p className="subtitle">
-          Drop .mov / .mp4 evidence videos → GIFs for Azure / Businessmap
-        </p>
-      </header>
 
       <div className="tabs" role="tablist" aria-label="Main sections">
         <button
@@ -496,7 +498,7 @@ function App() {
           aria-selected={activeTab === "convert"}
           onClick={() => setActiveTab("convert")}
         >
-          Convert
+          Convert 
         </button>
         <button
           type="button"
@@ -514,13 +516,6 @@ function App() {
           {ffmpeg.message}
         </div>
       )}
-
-      {ffmpeg?.available && (
-        <div className="banner banner-ok" title={ffmpeg.message}>
-          ffmpeg ready
-        </div>
-      )}
-
       {activeTab === "convert" && (
         <div className="tab-panel" role="tabpanel">
           <section className="dir-row">

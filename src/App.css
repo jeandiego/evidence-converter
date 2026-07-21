@@ -63,7 +63,7 @@ body {
 
 .header h1 {
   margin: 0;
-  font-size: 1.35rem;
+  font-size: 1.05rem;
   font-weight: 600;
   letter-spacing: -0.02em;
 }
@@ -282,7 +282,7 @@ body {
   padding: 0.55rem 0.65rem;
   border-radius: 8px;
   border: 1px solid var(--border);
-  background: var(--bg);
+  background: transparent;
   color: var(--text);
   font-family: var(--mono);
   font-size: 0.85rem;
@@ -356,10 +356,10 @@ body {
 .queue-item {
   position: relative;
   padding: 0.65rem 0.75rem;
-  background: var(--bg-elevated);
+  /* background: var(--bg-elevated); */
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  border-left-width: 3px;
+  border-left-width: 1.5px;
 }
 
 .queue-item.status-pending {
@@ -474,7 +474,7 @@ button {
   font-weight: 500;
   font-family: inherit;
   color: var(--text);
-  background: var(--bg-elevated);
+  background: transparent;
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
 }
@@ -529,7 +529,7 @@ html.platform-macos .app-macos {
 
 .macos-chrome {
   display: flex;
-  align-items: center;
+  /* align-items: center; */
   justify-content: space-between;
   gap: 0.75rem;
   margin: -0.15rem 0 0.15rem;
@@ -546,25 +546,23 @@ html.platform-macos .app-macos {
 }
 
 .macos-close {
-  width: 1.6rem;
-  height: 1.6rem;
-  padding: 0;
-  border-radius: 999px;
+  padding: 0.35rem;
+  border-radius: 4px;
   border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.06);
-  color: rgba(232, 234, 237, 0.85);
-  font-size: 1rem;
-  line-height: 1;
+  color: white;
+  width: 2rem;
+  height: 2rem;
+  /* width: 24px; */
+  /* height: 24px; */
+  display: flex;
+  justify-content: center;
+  align-items: center;
 }
 
 .macos-close:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.12);
   border-color: rgba(255, 255, 255, 0.2);
   color: #fff;
-}
-
-html.platform-macos .header h1 {
-  font-size: 1.15rem;
 }
 
 html.platform-macos .subtitle {

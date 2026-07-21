@@ -562,6 +562,18 @@ fn load_tray_icon() -> tauri::Result<tauri::image::Image<'static>> {
 }
 
 #[cfg(target_os = "macos")]
+fn macos_menu_click() -> bool {
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags};
+
+    NSEvent::modifierFlags_class().contains(NSEventModifierFlags::Control)
+}
+
+#[cfg(target_os = "macos")]
+fn show_tray_menu<R: tauri::Runtime>(tray: &tauri::tray::TrayIcon<R>) {
+    let _ = tray.with_inner_tray_icon(|inner| inner.show_menu());
+}
+
+#[cfg(target_os = "macos")]
 fn setup_macos_tray(app: &tauri::App) -> tauri::Result<()> {
     use tauri::{
         Manager,
@@ -596,12 +608,19 @@ fn setup_macos_tray(app: &tauri::App) -> tauri::Result<()> {
         .on_tray_icon_event(|tray, event| {
             tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
             if let TrayIconEvent::Click {
-                button: MouseButton::Left,
+                button,
                 button_state: MouseButtonState::Down,
                 ..
             } = event
             {
-                toggle_macos_panel(tray.app_handle());
+                let open_menu = matches!(button, MouseButton::Right)
+                    || (matches!(button, MouseButton::Left) && macos_menu_click());
+
+                if open_menu {
+                    show_tray_menu(tray);
+                } else if matches!(button, MouseButton::Left) {
+                    toggle_macos_panel(tray.app_handle());
+                }
             }
         })
         .build(app)?;
@@ -641,8 +660,11 @@ pub fn run() {
         .expect("error while running tauri application")
         .run(|_app, event| {
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                api.prevent_exit();
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                // Keep the app alive for tray-only usage, but allow explicit Quit.
+                if code.is_none() {
+                    api.prevent_exit();
+                }
             }
         });
 }
