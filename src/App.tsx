@@ -6,10 +6,11 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Store } from "@tauri-apps/plugin-store";
 import {
-  hideMacosWindow,
-  initMacosWindow,
+  hideAppWindow,
+  initPlatformWindow,
   isMacosPlatform,
-} from "./platform/macosWindow";
+  isWindowsPlatform,
+} from "./platform/window";
 import "./App.css";
 
 type TabId = "convert" | "preferences";
@@ -94,7 +95,77 @@ const BM_COMMENT_TEMPLATE_KEY = "businessmapCommentTemplate";
 const DEFAULT_BM_BASE_URL = "https://dasa.businessmap.io";
 const DEFAULT_BM_COMMENT_TEMPLATE = "{filename}";
 const VIDEO_EXT = /\.(mov|mp4)$/i;
-const CARD_URL_PATTERN = /\/cards\/(\d+)/;
+const IMAGE_EXT = /\.(jpe?g|png)$/i;
+const CARD_ID_PATTERN = /(?:^|\/)cards\/(\d+)/i;
+const BOARD_ID_PATTERN = /(?:^|\/)ctrl_board\/(\d+)/i;
+
+function normalizeCardPathInput(raw: string): string | null {
+  let value = raw.trim();
+  if (!value) return null;
+
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      value = new URL(value).pathname;
+    } catch {
+      return null;
+    }
+  }
+
+  value = value.replace(/^[^/]*businessmap\.io\/?/i, "");
+  value = value.replace(/^\/+/, "").replace(/\/+$/, "");
+  value = value.replace(/\/comments(\/.*)?$/i, "");
+
+  const cardMatch = value.match(CARD_ID_PATTERN);
+  if (!cardMatch) return null;
+
+  const cardId = cardMatch[1];
+  const boardMatch = value.match(BOARD_ID_PATTERN);
+
+  if (boardMatch) {
+    return `ctrl_board/${boardMatch[1]}/cards/${cardId}/`;
+  }
+
+  return `cards/${cardId}/`;
+}
+
+function parseCardIdFromPath(path: string): number | null {
+  const match = path.trim().match(CARD_ID_PATTERN);
+  if (!match) return null;
+  const id = Number.parseInt(match[1], 10);
+  return Number.isNaN(id) ? null : id;
+}
+
+function parseBoardIdFromPath(path: string): number | null {
+  const match = path.trim().match(BOARD_ID_PATTERN);
+  if (!match) return null;
+  const id = Number.parseInt(match[1], 10);
+  return Number.isNaN(id) ? null : id;
+}
+
+function isCompleteCardPath(path: string): boolean {
+  return parseBoardIdFromPath(path) !== null && parseCardIdFromPath(path) !== null;
+}
+
+function getCompleteCardPath(raw: string): string | null {
+  const normalized = normalizeCardPathInput(raw);
+  if (!normalized || !isCompleteCardPath(normalized)) return null;
+  return normalized;
+}
+
+function buildCardCommentsPageUrl(baseUrl: string, cardPath: string): string {
+  const normalized = getCompleteCardPath(cardPath);
+  if (!normalized) {
+    return baseUrl.replace(/\/+$/, "");
+  }
+  return `${baseUrl.replace(/\/+$/, "")}/${normalized.replace(/\/+$/, "")}/comments`;
+}
+
+function handleCardPathInput(raw: string): string {
+  if (/^https?:\/\//i.test(raw) || /businessmap\.io/i.test(raw)) {
+    return normalizeCardPathInput(raw) ?? raw;
+  }
+  return raw.replace(/\/comments\/?.*$/i, "");
+}
 
 const DEFAULT_FFMPEG_CONFIG: FfmpegConfig = {
   fps: 10,
@@ -107,24 +178,23 @@ function fileName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-function parseCardIdFromUrl(url: string): number | null {
-  const match = url.trim().match(CARD_URL_PATTERN);
-  if (!match) return null;
-  const id = Number.parseInt(match[1], 10);
-  return Number.isNaN(id) ? null : id;
-}
-
-function cardCommentsUrl(cardUrl: string, cardId: number, baseUrl: string): string {
-  const trimmed = cardUrl.trim();
-  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-    const base = trimmed.split("#")[0].replace(/\/$/, "");
-    return base.includes("/comments") ? base : `${base}/comments`;
-  }
-  return `${baseUrl.replace(/\/$/, "")}/ctrl_board/0/cards/${cardId}/comments`;
-}
-
 function isVideoPath(path: string): boolean {
   return VIDEO_EXT.test(path);
+}
+
+function isImagePath(path: string): boolean {
+  return IMAGE_EXT.test(path);
+}
+
+function isAcceptedPath(path: string, destination: DestinationId): boolean {
+  if (isVideoPath(path)) return true;
+  return destination === "businessmap" && isImagePath(path);
+}
+
+function acceptedFormatsLabel(destination: DestinationId): string {
+  return destination === "businessmap"
+    ? ".mov, .mp4, .jpg, or .png"
+    : ".mov or .mp4";
 }
 
 function buildGifFilterPreview(config: FfmpegConfig): string {
@@ -157,6 +227,7 @@ function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [store, setStore] = useState<Store | null>(null);
   const [isMacos] = useState(isMacosPlatform);
+  const [isWindows] = useState(isWindowsPlatform);
   const [destination, setDestination] = useState<DestinationId>("local");
   const [cardUrl, setCardUrl] = useState("");
   const [bmApiKey, setBmApiKey] = useState("");
@@ -171,14 +242,16 @@ function App() {
     [ffmpegConfig],
   );
 
-  const dropzoneHint = useMemo(
-    () =>
-      `.mov and .mp4 · fps ${ffmpegConfig.fps} · width ${ffmpegConfig.width} · ${ffmpegConfig.maxColors} colors`,
-    [ffmpegConfig],
-  );
+  const dropzoneHint = useMemo(() => {
+    const formats =
+      destination === "businessmap"
+        ? ".mov, .mp4, .jpg, .png"
+        : ".mov and .mp4";
+    return `${formats} · fps ${ffmpegConfig.fps} · width ${ffmpegConfig.width} · ${ffmpegConfig.maxColors} colors`;
+  }, [destination, ffmpegConfig]);
 
   useEffect(() => {
-    initMacosWindow().catch(console.error);
+    initPlatformWindow().catch(console.error);
   }, []);
 
   useEffect(() => {
@@ -329,19 +402,18 @@ function App() {
 
       unlisteners.push(
         await listen<ConvertBatchFinished>("convert-batch-finished", (event) => {
-          const { ok, failed, destination: dest, cardId, cardUrl: finishedCardUrl } =
-            event.payload;
+          const { ok, failed, destination: dest, cardUrl: finishedCardUrl } = event.payload;
           setConverting(false);
           setProgress(null);
 
           if (dest === "businessmap") {
             if (failed === 0) {
-              setNotice(`Posted ${ok} GIF${ok === 1 ? "" : "s"} to BusinessMap.`);
+              setNotice(`Posted ${ok} file${ok === 1 ? "" : "s"} to BusinessMap.`);
             } else {
               setNotice(`Posted ${ok}, failed ${failed} on BusinessMap.`);
             }
-            if (finishedCardUrl && cardId) {
-              setLastCardLink(cardCommentsUrl(finishedCardUrl, cardId, bmBaseUrl));
+            if (finishedCardUrl) {
+              setLastCardLink(buildCardCommentsPageUrl(bmBaseUrl, finishedCardUrl));
             }
           } else {
             setNotice(
@@ -361,34 +433,52 @@ function App() {
     };
   }, [bmBaseUrl]);
 
-  const addPaths = useCallback((paths: string[]) => {
-    const videos = paths.filter(isVideoPath);
-    const skipped = paths.length - videos.length;
+  const addPaths = useCallback(
+    (paths: string[]) => {
+      const accepted = paths.filter((path) => isAcceptedPath(path, destination));
+      const skipped = paths.length - accepted.length;
 
-    if (skipped > 0) {
-      setNotice(
-        skipped === 1
-          ? "Skipped 1 non-video file (.mov / .mp4 only)."
-          : `Skipped ${skipped} non-video files (.mov / .mp4 only).`,
-      );
-    } else {
-      setNotice(null);
-    }
+      if (skipped > 0) {
+        setNotice(
+          skipped === 1
+            ? `Skipped 1 unsupported file (${acceptedFormatsLabel(destination)}).`
+            : `Skipped ${skipped} unsupported files (${acceptedFormatsLabel(destination)}).`,
+        );
+      } else {
+        setNotice(null);
+      }
 
-    if (videos.length === 0) return;
+      if (accepted.length === 0) return;
+
+      setQueue((prev) => {
+        const existing = new Set(prev.map((item) => item.path));
+        const next = accepted
+          .filter((path) => !existing.has(path))
+          .map((path) => ({
+            path,
+            name: fileName(path),
+            status: "pending" as const,
+          }));
+        return next.length ? [...prev, ...next] : prev;
+      });
+    },
+    [destination],
+  );
+
+  useEffect(() => {
+    if (destination !== "local") return;
 
     setQueue((prev) => {
-      const existing = new Set(prev.map((item) => item.path));
-      const next = videos
-        .filter((path) => !existing.has(path))
-        .map((path) => ({
-          path,
-          name: fileName(path),
-          status: "pending" as const,
-        }));
-      return next.length ? [...prev, ...next] : prev;
+      const images = prev.filter((item) => isImagePath(item.path));
+      if (images.length === 0) return prev;
+      setNotice(
+        images.length === 1
+          ? "Removed 1 image from queue (images only post to BusinessMap)."
+          : `Removed ${images.length} images from queue (images only post to BusinessMap).`,
+      );
+      return prev.filter((item) => !isImagePath(item.path));
     });
-  }, []);
+  }, [destination]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -495,7 +585,14 @@ function App() {
   async function addFiles() {
     const selected = await open({
       multiple: true,
-      filters: [{ name: "Video", extensions: ["mov", "mp4"] }],
+      filters: [
+        destination === "businessmap"
+          ? {
+              name: "Evidence",
+              extensions: ["mov", "mp4", "jpg", "jpeg", "png"],
+            }
+          : { name: "Video", extensions: ["mov", "mp4"] },
+      ],
     });
     if (selected == null) return;
     const paths = Array.isArray(selected) ? selected : [selected];
@@ -532,10 +629,19 @@ function App() {
     void persistFfmpegConfig({ ...ffmpegConfig, [field]: parsed });
   }
 
-  const pendingCount = useMemo(
-    () => queue.filter((item) => item.status === "pending" || item.status === "error").length,
+  const pendingItems = useMemo(
+    () => queue.filter((item) => item.status === "pending" || item.status === "error"),
     [queue],
   );
+
+  const pendingCount = pendingItems.length;
+
+  const pendingHasVideos = useMemo(
+    () => pendingItems.some((item) => isVideoPath(item.path)),
+    [pendingItems],
+  );
+
+  const pendingHasImagesOnly = pendingCount > 0 && !pendingHasVideos;
 
   const doneCount = useMemo(
     () => queue.filter((item) => item.status === "done").length,
@@ -545,7 +651,7 @@ function App() {
   async function convert() {
     if (converting) return;
 
-    if (!ffmpeg?.available) {
+    if (pendingHasVideos && !ffmpeg?.available) {
       setNotice(ffmpeg?.message ?? "ffmpeg is not available.");
       return;
     }
@@ -556,12 +662,9 @@ function App() {
     }
 
     if (destination === "businessmap") {
-      if (!cardUrl.trim()) {
-        setNotice("Paste a BusinessMap card URL.");
-        return;
-      }
-      if (!parseCardIdFromUrl(cardUrl)) {
-        setNotice("Could not find card ID in URL. Use …/cards/402794/…");
+      const normalizedPath = getCompleteCardPath(cardUrl);
+      if (!normalizedPath) {
+        setNotice("Enter full path with board: ctrl_board/99/cards/402794/");
         return;
       }
       if (!bmApiKey.trim()) {
@@ -570,11 +673,9 @@ function App() {
       }
     }
 
-    const toConvert = queue.filter(
-      (item) => item.status === "pending" || item.status === "error",
-    );
+    const toConvert = pendingItems;
     if (toConvert.length === 0) {
-      setNotice("Add at least one .mov or .mp4 file.");
+      setNotice(`Add at least one supported file (${acceptedFormatsLabel(destination)}).`);
       return;
     }
 
@@ -590,14 +691,17 @@ function App() {
     });
 
     try {
+      const normalizedCardPath =
+        destination === "businessmap" ? getCompleteCardPath(cardUrl) : null;
+
       await invoke("convert_videos", {
         paths: toConvert.map((item) => item.path),
         outputDir: destination === "local" ? outputDir : null,
         destination,
         businessmap:
-          destination === "businessmap"
+          destination === "businessmap" && normalizedCardPath
             ? {
-                cardUrl: cardUrl.trim(),
+                cardUrl: normalizedCardPath,
                 apiKey: bmApiKey.trim(),
                 baseUrl: bmBaseUrl.trim() || DEFAULT_BM_BASE_URL,
                 commentTemplate: bmCommentTemplate.trim() || DEFAULT_BM_COMMENT_TEMPLATE,
@@ -613,27 +717,35 @@ function App() {
   }
 
   const canConvert =
-    ffmpeg?.available &&
     pendingCount > 0 &&
     !converting &&
-    (destination === "local" ? Boolean(outputDir) : Boolean(cardUrl.trim() && bmApiKey.trim()));
+    (!pendingHasVideos || ffmpeg?.available) &&
+    (destination === "local"
+      ? Boolean(outputDir)
+      : Boolean(getCompleteCardPath(cardUrl) && bmApiKey.trim()));
 
   const convertButtonLabel = converting
     ? destination === "businessmap"
-      ? "Converting & posting…"
+      ? pendingHasImagesOnly
+        ? "Posting…"
+        : "Converting & posting…"
       : "Converting…"
     : pendingCount > 0
       ? destination === "businessmap"
-        ? `Convert & post ${pendingCount}`
+        ? pendingHasImagesOnly
+          ? `Post ${pendingCount}`
+          : `Convert & post ${pendingCount}`
         : `Convert ${pendingCount}`
       : destination === "businessmap"
-        ? "Convert & post"
+        ? pendingHasImagesOnly
+          ? "Post"
+          : "Convert & post"
         : "Convert";
 
   const progressPercent = progress ? overallPercent(progress) : 0;
 
   return (
-    <main className={`app${isMacos ? " app-macos" : ""}`}>
+    <main className={`app${isMacos ? " app-macos" : ""}${isWindows ? " app-windows" : ""}`}>
       {isMacos && (
         <div className="macos-chrome" data-tauri-drag-region>
         <header className="header">
@@ -647,16 +759,37 @@ function App() {
             className="macos-close"
             aria-label="Close panel"
             onClick={() => {
-              hideMacosWindow().catch(console.error);
+              hideAppWindow().catch(console.error);
             }}
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" 
               width="24" 
               height="24"
-              fill="rgba(255,255,255,1)"><path d="M11.9997 10.5865L16.9495 5.63672L18.3637 7.05093L13.4139 12.0007L18.3637 16.9504L16.9495 18.3646L11.9997 13.4149L7.04996 18.3646L5.63574 16.9504L10.5855 12.0007L5.63574 7.05093L7.04996 5.63672L11.9997 10.5865Z"></path></svg>
+              fill="currentColor"><path d="M11.9997 10.5865L16.9495 5.63672L18.3637 7.05093L13.4139 12.0007L18.3637 16.9504L16.9495 18.3646L11.9997 13.4149L7.04996 18.3646L5.63574 16.9504L10.5855 12.0007L5.63574 7.05093L7.04996 5.63672L11.9997 10.5865Z"></path></svg>
           </button>
         </div>
         
+      )}
+
+      {isWindows && (
+        <div className="windows-chrome" data-tauri-drag-region>
+          <header className="header">
+            <h1 className="windows-title">Evidence GIF Converter</h1>
+            <p className="subtitle">Drop .mov / .mp4 evidence videos → GIFs</p>
+          </header>
+          <button
+            type="button"
+            className="windows-close"
+            aria-label="Close window"
+            onClick={() => {
+              hideAppWindow().catch(console.error);
+            }}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+              <path d="M2 2 10 10M10 2 2 10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" fill="none" />
+            </svg>
+          </button>
+        </div>
       )}
 
       <div className="tabs" role="tablist" aria-label="Main sections">
@@ -680,7 +813,7 @@ function App() {
         </button>
       </div>
 
-      {ffmpeg && !ffmpeg.available && (
+      {ffmpeg && !ffmpeg.available && pendingHasVideos && (
         <div className="banner banner-error" role="alert">
           {ffmpeg.message}
         </div>
@@ -730,17 +863,29 @@ function App() {
           ) : (
             <section className="card-url-row">
               <label className="card-url-field">
-                <span className="label">Card URL</span>
-                <input
-                  type="url"
-                  className="card-url-input"
-                  placeholder="https://dasa.businessmap.io/ctrl_board/99/cards/402794/comments/"
-                  value={cardUrl}
-                  disabled={converting}
-                  onChange={(event) => setCardUrl(event.target.value)}
-                />
+                {/* <span className="label">Card path</span> */}
+                <div className="card-url-combo">
+                  <span className="card-url-prefix" title={bmBaseUrl}>
+                    {(bmBaseUrl.trim() || DEFAULT_BM_BASE_URL).replace(/\/+$/, "").replace(/^https?:\/\//, "")}/
+                  </span>
+                  <input
+                    type="text"
+                    className="card-url-input"
+                    placeholder="ctrl_board/99/cards/402794/"
+                    value={cardUrl}
+                    disabled={converting}
+                    onChange={(event) => {
+                      setCardUrl(handleCardPathInput(event.target.value));
+                    }}
+                    onBlur={() => {
+                      const normalized = normalizeCardPathInput(cardUrl);
+                      if (normalized) setCardUrl(normalized);
+                    }}
+                  />
+                </div>
                 <span className="pref-hint">
-                  Paste the card comments page URL — GIFs post as comment attachments.
+                  Board required — ctrl_board/99/cards/402794/ 
+                  {/* (paste full URL ok; /comments added automatically). */}
                 </span>
               </label>
             </section>
@@ -748,9 +893,17 @@ function App() {
 
           <section
             className={`dropzone ${dropActive ? "dropzone-active" : ""}`}
-            aria-label="Drop video files here"
+            aria-label={
+              destination === "businessmap"
+                ? "Drop video or image files here"
+                : "Drop video files here"
+            }
           >
-            <p className="dropzone-title">Drag & drop videos here</p>
+            <p className="dropzone-title">
+              {destination === "businessmap"
+                ? "Drag & drop videos or images here"
+                : "Drag & drop videos here"}
+            </p>
             <p className="dropzone-hint">{dropzoneHint}</p>
             <button type="button" className="secondary" onClick={addFiles}>
               Add files…
@@ -993,7 +1146,7 @@ function App() {
                     void persistBmSettings({ commentTemplate: event.target.value });
                   }}
                 />
-                <span className="pref-hint">Use {"{filename}"} for the GIF name.</span>
+                <span className="pref-hint">Use {"{filename}"} for the attachment name.</span>
               </label>
             </div>
 

@@ -102,7 +102,7 @@ fn generate_csrf_token() -> String {
 pub fn parse_card_id(input: &str) -> Result<u64, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err("Card URL or ID is required".to_string());
+        return Err("Card path is required".to_string());
     }
 
     if let Ok(id) = trimmed.parse::<u64>() {
@@ -112,14 +112,36 @@ pub fn parse_card_id(input: &str) -> Result<u64, String> {
         return Err("Card ID must be a positive number".to_string());
     }
 
-    let re = Regex::new(r"/cards/(\d+)(?:/|$|\?)").map_err(|e| format!("Regex error: {e}"))?;
+    let re = Regex::new(r"(?i)(?:^|/)cards/(\d+)(?:/|$|\?)")
+        .map_err(|e| format!("Regex error: {e}"))?;
     re.captures(trimmed)
         .and_then(|caps| caps.get(1))
         .and_then(|m| m.as_str().parse::<u64>().ok())
         .filter(|id| *id > 0)
         .ok_or_else(|| {
-            "Could not parse card ID from URL. Paste a link like …/cards/402794/comments/".to_string()
+            "Could not parse card ID. Use ctrl_board/99/cards/402794/".to_string()
         })
+}
+
+pub fn parse_board_id(input: &str) -> Result<u64, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Card path is required".to_string());
+    }
+
+    let re = Regex::new(r"(?i)(?:^|/)ctrl_board/(\d+)(?:/|$|\?)")
+        .map_err(|e| format!("Regex error: {e}"))?;
+    re.captures(trimmed)
+        .and_then(|caps| caps.get(1))
+        .and_then(|m| m.as_str().parse::<u64>().ok())
+        .filter(|id| *id > 0)
+        .ok_or_else(|| "Board ID is required. Use ctrl_board/99/cards/402794/".to_string())
+}
+
+pub fn validate_card_path(input: &str) -> Result<(), String> {
+    parse_board_id(input)?;
+    parse_card_id(input)?;
+    Ok(())
 }
 
 pub fn render_comment_template(template: &str, filename: &str) -> String {
@@ -165,7 +187,13 @@ pub fn test_connection(base_url: &str, api_key: &str) -> Result<String, String> 
         .unwrap_or_else(|| "Connected".to_string()))
 }
 
-pub fn upload_file(base_url: &str, api_key: &str, file_name: &str, bytes: &[u8]) -> Result<String, String> {
+pub fn upload_file(
+    base_url: &str,
+    api_key: &str,
+    file_name: &str,
+    bytes: &[u8],
+    mime_type: &str,
+) -> Result<String, String> {
     let base = normalize_base_url(base_url)?;
     let api_key = api_key.trim();
     if api_key.is_empty() {
@@ -175,7 +203,7 @@ pub fn upload_file(base_url: &str, api_key: &str, file_name: &str, bytes: &[u8])
         return Err("File name is required".to_string());
     }
     if bytes.is_empty() {
-        return Err("GIF file is empty".to_string());
+        return Err("File is empty".to_string());
     }
 
     let csrf = generate_csrf_token();
@@ -183,7 +211,7 @@ pub fn upload_file(base_url: &str, api_key: &str, file_name: &str, bytes: &[u8])
 
     let part = reqwest::blocking::multipart::Part::bytes(bytes.to_vec())
         .file_name(file_name.to_string())
-        .mime_str("image/gif")
+        .mime_str(mime_type)
         .map_err(|e| format!("Failed to prepare upload: {e}"))?;
 
     let form = reqwest::blocking::multipart::Form::new()
@@ -282,6 +310,18 @@ mod tests {
             parse_card_id("https://dasa.businessmap.io/ctrl_board/99/cards/402794/comments/").unwrap(),
             402794
         );
+    }
+
+    #[test]
+    fn parse_card_id_from_path_requires_cards_segment() {
+        assert_eq!(parse_card_id("ctrl_board/99/cards/402794/").unwrap(), 402794);
+        assert_eq!(parse_card_id("cards/402794/").unwrap(), 402794);
+    }
+
+    #[test]
+    fn validate_card_path_requires_board() {
+        assert!(validate_card_path("ctrl_board/99/cards/402794/").is_ok());
+        assert!(validate_card_path("cards/402794/").is_err());
     }
 
     #[test]

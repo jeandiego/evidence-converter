@@ -11,11 +11,33 @@
       #root {
         background: transparent !important;
       }
+
+      html.platform-macos,
+      html.platform-windows,
+      html.platform-macos body,
+      html.platform-windows body,
+      html.platform-macos #root,
+      html.platform-windows #root {
+        height: 100%;
+        overflow: hidden;
+        overscroll-behavior: none;
+      }
+
+      html:not(.platform-macos):not(.platform-windows),
+      html:not(.platform-macos):not(.platform-windows) body,
+      html:not(.platform-macos):not(.platform-windows) #root {
+        background: #1a1d23 !important;
+      }
     </style>
     <script>
-      if (/Mac/i.test(navigator.platform)) {
-        document.documentElement.classList.add("platform-macos");
-      }
+      (function () {
+        var platform = navigator.platform || "";
+        if (/Mac/i.test(platform)) {
+          document.documentElement.classList.add("platform-macos");
+        } else if (/Win/i.test(platform)) {
+          document.documentElement.classList.add("platform-windows");
+        }
+      })();
     </script>
   </head>
 

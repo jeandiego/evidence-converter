@@ -14,6 +14,7 @@
   --radius: 10px;
   --font: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
   --mono: "IBM Plex Mono", "SF Mono", ui-monospace, monospace;
+  --text-shadow: none;
 
   color: var(--text);
   background: var(--bg);
@@ -26,12 +27,46 @@
 }
 
 html.platform-macos {
-  --bg: rgba(26, 29, 35, 0.55);
-  --bg-elevated: rgba(35, 39, 47, 0.72);
-  --bg-drop: rgba(30, 34, 41, 0.68);
-  --border: rgba(255, 255, 255, 0.1);
-  --border-active: rgba(122, 163, 245, 0.85);
+  color-scheme: dark;
+  --bg: rgba(22, 22, 24, 0.36);
+  --bg-elevated: rgba(50, 50, 52, 0.28);
+  --bg-drop: rgba(40, 40, 42, 0.72);
+  --border: rgba(255, 255, 255, 0.16);
+  --border-active: rgba(122, 163, 245, 0.95);
+  --text: rgba(255, 255, 255, 0.96);
+  --text-muted: rgba(255, 255, 255, 0.74);
+  --text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
   background: transparent;
+}
+
+html.platform-windows {
+  color-scheme: dark light;
+  --font: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+  --bg: transparent;
+  --bg-elevated: rgba(255, 255, 255, 0.045);
+  --bg-drop: rgba(255, 255, 255, 0.03);
+  --border: rgba(255, 255, 255, 0.08);
+  --border-active: rgba(96, 205, 255, 0.85);
+  --text: rgba(255, 255, 255, 0.92);
+  --text-muted: rgba(255, 255, 255, 0.62);
+  --accent: #60cdff;
+  --accent-hover: #8adbff;
+  --radius: 8px;
+  background: transparent;
+}
+
+@media (prefers-color-scheme: light) {
+  html.platform-windows {
+    --bg-elevated: rgba(255, 255, 255, 0.72);
+    --bg-drop: rgba(255, 255, 255, 0.58);
+    --border: rgba(0, 0, 0, 0.08);
+    --border-active: rgba(0, 103, 192, 0.85);
+    --text: rgba(0, 0, 0, 0.9);
+    --text-muted: rgba(0, 0, 0, 0.58);
+    --accent: #0067c0;
+    --accent-hover: #005a9e;
+  }
 }
 
 * {
@@ -45,10 +80,29 @@ body,
   min-height: 100%;
 }
 
+html.platform-macos,
+html.platform-windows {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+html.platform-macos body,
+html.platform-windows body,
+html.platform-macos #root,
+html.platform-windows #root {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 body {
-  background:
-    radial-gradient(ellipse 80% 50% at 50% -20%, #2a3550 0%, transparent 55%),
-    var(--bg);
+  background: var(--bg);
+}
+
+html.platform-macos body,
+html.platform-windows body {
+  background: transparent;
 }
 
 .app {
@@ -80,6 +134,7 @@ body {
   padding: 0.1rem;
   border: 1px solid var(--border);
   border-radius: var(--radius);
+  flex-shrink: 0;
 }
 
 .tab {
@@ -107,12 +162,14 @@ body {
   flex-direction: column;
   gap: 1rem;
   flex: 1;
+  min-height: 0;
 }
 
 .banner {
   padding: 0.55rem 0.75rem;
   border-radius: var(--radius);
   font-size: 0.85rem;
+  flex-shrink: 0;
 }
 
 .banner-error {
@@ -195,6 +252,46 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
+}
+
+.card-url-combo {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: transparent;
+}
+
+.card-url-combo:focus-within {
+  border-color: var(--accent);
+}
+
+.card-url-prefix {
+  flex-shrink: 0;
+  padding: 0.55rem 0.65rem;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  border-right: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 45%;
+}
+
+.card-url-combo .card-url-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.card-url-combo .card-url-input:focus {
+  outline: none;
+  border: none;
 }
 
 .card-url-input {
@@ -428,6 +525,7 @@ body {
   gap: 0.45rem;
   max-height: 280px;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .queue-item {
@@ -593,87 +691,246 @@ button.secondary {
 
 html.platform-macos,
 html.platform-macos body,
-html.platform-macos #root {
+html.platform-macos #root,
+html.platform-windows,
+html.platform-windows body,
+html.platform-windows #root {
   background: transparent;
-}
-
-html.platform-macos body {
-  background: none;
 }
 
 html.platform-macos .app {
   max-width: none;
   margin: 0;
-  min-height: 100vh;
+  height: 100dvh;
+  max-height: 100dvh;
+  min-height: 0;
   padding: 0.75rem 1rem 1.25rem;
+  background: var(--bg);
+  border-radius: 12px;
+  overflow: hidden;
 }
 
 html.platform-macos .app-macos {
   gap: 0.75rem;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+html.platform-macos .tab-panel,
+html.platform-windows .tab-panel {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: auto;
+  padding-right: 0.1rem;
+}
+
+html.platform-macos .header h1,
+html.platform-macos .header h2,
+html.platform-macos .dropzone-title,
+html.platform-macos .macos-title,
+html.platform-macos .queue-header h2,
+html.platform-macos .prefs h2 {
+  text-shadow: var(--text-shadow);
+}
+
+html.platform-macos .subtitle,
+html.platform-macos .label,
+html.platform-macos .pref-hint,
+html.platform-macos .dropzone-hint,
+html.platform-macos .empty,
+html.platform-macos .count,
+html.platform-macos .notice,
+html.platform-macos .destination-option,
+html.platform-macos .tab,
+html.platform-macos .queue-status,
+html.platform-macos .linkish,
+html.platform-macos .dir-path,
+html.platform-macos .card-url-prefix,
+html.platform-macos .pref-preview-code {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+html.platform-windows .app {
+  max-width: none;
+  margin: 0;
+  height: 100dvh;
+  max-height: 100dvh;
+  min-height: 0;
+  padding: 0.5rem 0.85rem 1.1rem;
+  overflow: hidden;
+  border-radius: 8px;
+}
+
+html.platform-windows .app-windows {
+  gap: 0.75rem;
+}
+
+.macos-chrome,
+.windows-chrome {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-shrink: 0;
+  margin: 0 0 0.15rem;
+  padding: 0.15rem 0.1rem 0.35rem;
 }
 
 .macos-chrome {
-  display: flex;
-  /* align-items: center; */
-  justify-content: space-between;
-  gap: 0.75rem;
-  margin: -0.15rem 0 0.15rem;
-  padding: 0.15rem 0.1rem 0.35rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-.macos-title {
+.windows-chrome {
+  border-bottom: 1px solid var(--border);
+  padding-top: 0.35rem;
+}
+
+.macos-title,
+.windows-title {
   font-size: 0.82rem;
   font-weight: 600;
-  color: rgba(232, 234, 237, 0.92);
   letter-spacing: -0.01em;
   user-select: none;
 }
 
-.macos-close {
-  padding: 0.35rem;
-  border-radius: 4px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: white;
-  width: 2rem;
-  height: 2rem;
-  /* width: 24px; */
-  /* height: 24px; */
+.macos-title {
+  color: var(--text);
+}
+
+.windows-title {
+  color: var(--text);
+}
+
+.macos-close,
+.windows-close {
+  flex-shrink: 0;
   display: flex;
   justify-content: center;
   align-items: center;
+  padding: 0;
+  color: var(--text-muted);
+}
+
+.macos-close {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
 .macos-close:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.12);
   border-color: rgba(255, 255, 255, 0.2);
-  color: #fff;
+  color: var(--text);
 }
 
-html.platform-macos .subtitle {
+.windows-close {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+}
+
+.windows-close:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
+@media (prefers-color-scheme: light) {
+  html.platform-windows .windows-close:hover:not(:disabled) {
+    background: rgba(0, 0, 0, 0.06);
+  }
+}
+
+html.platform-macos .subtitle,
+html.platform-windows .subtitle {
   font-size: 0.82rem;
 }
 
 html.platform-macos .tabs,
 html.platform-macos .dir-row,
+html.platform-macos .destination-row,
+html.platform-macos .card-url-row,
 html.platform-macos .dropzone,
 html.platform-macos .progress-panel,
 html.platform-macos .prefs,
 html.platform-macos .queue-item {
-  backdrop-filter: blur(18px) saturate(140%);
-  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  background: var(--bg-elevated);
+  border-color: var(--border);
+}
+
+html.platform-macos .tab-active {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text);
+}
+
+html.platform-macos .card-url-prefix {
+  background: rgba(36, 36, 38, 0.85);
 }
 
 html.platform-macos .dropzone-active {
-  background: rgba(91, 141, 239, 0.14);
+  background: rgba(91, 141, 239, 0.22);
+  border-color: var(--border-active);
+}
+html.platform-windows .tabs,
+html.platform-windows .dir-row,
+html.platform-windows .destination-row,
+html.platform-windows .card-url-row,
+html.platform-windows .dropzone,
+html.platform-windows .progress-panel,
+html.platform-windows .prefs,
+html.platform-windows .queue-item {
+  background: var(--bg-elevated);
+  border-color: var(--border);
+}
+
+html.platform-windows .dropzone-active {
+  background: rgba(96, 205, 255, 0.12);
+  border-color: var(--border-active);
+}
+
+@media (prefers-color-scheme: light) {
+  html.platform-windows .dropzone-active {
+    background: rgba(0, 103, 192, 0.08);
+  }
 }
 
 html.platform-macos .banner-error {
-  background: rgba(212, 101, 101, 0.18);
-  border-color: rgba(212, 101, 101, 0.35);
+  background: rgba(212, 101, 101, 0.22);
+  border-color: rgba(212, 101, 101, 0.38);
 }
 
 html.platform-macos .banner-ok {
-  background: rgba(61, 154, 106, 0.16);
-  border-color: rgba(61, 154, 106, 0.32);
+  background: rgba(61, 154, 106, 0.2);
+  border-color: rgba(61, 154, 106, 0.34);
+}
+
+html.platform-windows .tab-active {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+@media (prefers-color-scheme: light) {
+  html.platform-windows .tab-active {
+    background: rgba(0, 0, 0, 0.05);
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  html.platform-macos,
+  html.platform-windows {
+    --bg: #1a1d23;
+    --bg-elevated: #23272f;
+    --bg-drop: #1e2229;
+    --border: #343a46;
+    --text: #e8eaed;
+    --text-muted: #9aa0a6;
+    --text-shadow: none;
+    background: var(--bg);
+  }
+
+  html.platform-macos body,
+  html.platform-windows body,
+  html.platform-macos #root,
+  html.platform-windows #root {
+    background: var(--bg);
+  }
 }

@@ -1,4 +1,5 @@
 mod businessmap;
+mod images;
 
 use businessmap::BusinessmapConfig;
 use serde::{Deserialize, Serialize};
@@ -394,9 +395,15 @@ fn check_ffmpeg(app: AppHandle) -> FfmpegStatus {
     }
 }
 
+fn paths_need_ffmpeg(paths: &[String]) -> bool {
+    paths.iter().any(|path_str| {
+        is_supported_video(Path::new(path_str))
+    })
+}
+
 fn convert_videos_inner(
     app: AppHandle,
-    tools: ToolPaths,
+    tools: Option<ToolPaths>,
     paths: Vec<String>,
     output_dir: PathBuf,
     config: FfmpegConfig,
@@ -460,17 +467,110 @@ fn convert_videos_inner(
             continue;
         }
 
+        if images::is_supported_image(&input) {
+            match destination {
+                ConvertDestination::Businessmap => {
+                    let bm = bm_config.as_ref().expect("BusinessMap config");
+                    let card_id = businessmap::parse_card_id(&bm.card_url).unwrap_or(0);
+
+                    let _ = app.emit(
+                        "convert-file-uploading",
+                        ConvertFileUploading {
+                            index,
+                            total,
+                            name: name.clone(),
+                            path: path_str.clone(),
+                        },
+                    );
+
+                    match images::prepare_image_for_upload(&input) {
+                        Ok((bytes, upload_name, mime_type)) => {
+                            match post_attachment_to_businessmap(
+                                bm,
+                                card_id,
+                                &upload_name,
+                                mime_type,
+                                &bytes,
+                            ) {
+                                Ok(()) => {
+                                    ok_count += 1;
+                                    let result = ConvertResult {
+                                        name: name.clone(),
+                                        ok: true,
+                                        error: None,
+                                        output_path: None,
+                                    };
+                                    emit_file_finished(&app, index, total, &path_str, &result);
+                                }
+                                Err(error) => {
+                                    failed_count += 1;
+                                    let result = ConvertResult {
+                                        name: name.clone(),
+                                        ok: false,
+                                        error: Some(error),
+                                        output_path: None,
+                                    };
+                                    emit_file_finished(&app, index, total, &path_str, &result);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            failed_count += 1;
+                            let result = ConvertResult {
+                                name: name.clone(),
+                                ok: false,
+                                error: Some(error),
+                                output_path: None,
+                            };
+                            emit_file_finished(&app, index, total, &path_str, &result);
+                        }
+                    }
+                }
+                ConvertDestination::Local => {
+                    failed_count += 1;
+                    let result = ConvertResult {
+                        name: name.clone(),
+                        ok: false,
+                        error: Some("Images can only be posted to BusinessMap".to_string()),
+                        output_path: None,
+                    };
+                    emit_file_finished(&app, index, total, &path_str, &result);
+                }
+            }
+            continue;
+        }
+
         if !is_supported_video(&input) {
             failed_count += 1;
+            let unsupported_message = if destination == ConvertDestination::Businessmap {
+                "Unsupported format (use .mov, .mp4, .jpg, or .png)".to_string()
+            } else {
+                "Unsupported format (use .mov or .mp4)".to_string()
+            };
             let result = ConvertResult {
                 name: name.clone(),
                 ok: false,
-                error: Some("Unsupported format (use .mov or .mp4)".to_string()),
+                error: Some(unsupported_message),
                 output_path: None,
             };
             emit_file_finished(&app, index, total, &path_str, &result);
             continue;
         }
+
+        let tools = match tools.as_ref() {
+            Some(tools) => tools,
+            None => {
+                failed_count += 1;
+                let result = ConvertResult {
+                    name: name.clone(),
+                    ok: false,
+                    error: Some(TOOL_UNAVAILABLE.to_string()),
+                    output_path: None,
+                };
+                emit_file_finished(&app, index, total, &path_str, &result);
+                continue;
+            }
+        };
 
         let stem = input
             .file_stem()
@@ -510,7 +610,19 @@ fn convert_videos_inner(
                     },
                 );
 
-                match post_gif_to_businessmap(bm, card_id, &gif_name, &output_path) {
+                let upload_result = fs::read(&output_path)
+                    .map_err(|e| format!("Failed to read GIF: {e}"))
+                    .and_then(|bytes| {
+                        post_attachment_to_businessmap(
+                            bm,
+                            card_id,
+                            &gif_name,
+                            "image/gif",
+                            &bytes,
+                        )
+                    });
+
+                match upload_result {
                     Ok(()) => {
                         cleanup_temp_gif(&output_path, &output_dir);
                         ok_count += 1;
@@ -579,21 +691,27 @@ fn convert_videos_inner(
     );
 }
 
-fn post_gif_to_businessmap(
+fn post_attachment_to_businessmap(
     config: &BusinessmapConfig,
     card_id: u64,
-    gif_name: &str,
-    gif_path: &Path,
+    file_name: &str,
+    mime_type: &str,
+    bytes: &[u8],
 ) -> Result<(), String> {
-    let bytes = fs::read(gif_path).map_err(|e| format!("Failed to read GIF: {e}"))?;
-    let link = businessmap::upload_file(&config.base_url, &config.api_key, gif_name, &bytes)?;
-    let comment = businessmap::render_comment_template(&config.comment_template, gif_name);
+    let link = businessmap::upload_file(
+        &config.base_url,
+        &config.api_key,
+        file_name,
+        bytes,
+        mime_type,
+    )?;
+    let comment = businessmap::render_comment_template(&config.comment_template, file_name);
     businessmap::post_comment_with_attachment(
         &config.base_url,
         &config.api_key,
         card_id,
         &comment,
-        gif_name,
+        file_name,
         &link,
     )
 }
@@ -672,7 +790,7 @@ async fn convert_videos(
             let options = businessmap
                 .as_ref()
                 .ok_or_else(|| "BusinessMap settings are required".to_string())?;
-            businessmap::parse_card_id(&options.card_url)?;
+            businessmap::validate_card_path(&options.card_url)?;
             if options.api_key.trim().is_empty() {
                 return Err("BusinessMap API key is required".to_string());
             }
@@ -680,7 +798,11 @@ async fn convert_videos(
         }
     };
 
-    let tools = resolve_tools(&app)?;
+    let tools = if paths_need_ffmpeg(&paths) {
+        Some(resolve_tools(&app)?)
+    } else {
+        None
+    };
     let bm_options = businessmap;
     tauri::async_runtime::spawn_blocking(move || {
         convert_videos_inner(
@@ -734,6 +856,47 @@ fn configure_macos_window(window: &tauri::WebviewWindow) -> tauri::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn configure_windows_window(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    use tauri::window::{Color, Effect, EffectsBuilder};
+
+    window.set_background_color(Some(Color(0, 0, 0, 0)))?;
+
+    let tabbed = window.set_effects(EffectsBuilder::new().effect(Effect::Tabbed).build());
+    if tabbed.is_ok() {
+        return Ok(());
+    }
+
+    let mica = window.set_effects(EffectsBuilder::new().effect(Effect::Mica).build());
+    if mica.is_ok() {
+        return Ok(());
+    }
+
+    let _ = window.set_effects(
+        EffectsBuilder::new()
+            .effect(Effect::Acrylic)
+            .color(Color(32, 32, 32, 180))
+            .build(),
+    );
+
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn configure_platform_window(_window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn configure_platform_window(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    configure_windows_window(window)
+}
+
+#[cfg(target_os = "macos")]
+fn configure_platform_window(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    configure_macos_window(window)
+}
+
 #[cfg(target_os = "macos")]
 fn toggle_macos_panel(app: &tauri::AppHandle) {
     use tauri::Manager;
@@ -782,7 +945,6 @@ fn setup_macos_tray(app: &tauri::App) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&quit])?;
 
     if let Some(window) = app.get_webview_window("main") {
-        configure_macos_window(&window)?;
         let _ = window.set_visible_on_all_workspaces(true);
         let _ = window.hide();
     }
@@ -838,6 +1000,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            use tauri::Manager;
+
+            if let Some(window) = app.get_webview_window("main") {
+                configure_platform_window(&window)?;
+            }
+
             #[cfg(target_os = "macos")]
             {
                 app.handle().plugin(tauri_plugin_positioner::init())?;
