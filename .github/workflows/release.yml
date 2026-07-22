@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: ""
+            ffmpeg: download-ffmpeg:mac
+          - platform: windows-latest
+            args: "--bundles nsis"
+            ffmpeg: download-ffmpeg:windows
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Download FFmpeg sidecars
+        run: bun run ${{ matrix.ffmpeg }}
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: Evidence GIF Converter v__VERSION__
+          releaseBody: |
+            Installers for macOS (Apple Silicon) and Windows.
+
+            - **macOS:** `evidence-cvt_*_aarch64.dmg` — open the DMG and drag the app to Applications.
+            - **Windows:** `evidence-cvt_*_x64-setup.exe` — run the NSIS installer.
+
+            FFmpeg is bundled; no extra setup required.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

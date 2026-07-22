@@ -897,8 +897,13 @@ fn configure_platform_window(window: &tauri::WebviewWindow) -> tauri::Result<()>
     configure_macos_window(window)
 }
 
-#[cfg(target_os = "macos")]
-fn toggle_macos_panel(app: &tauri::AppHandle) {
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn load_tray_icon() -> tauri::Result<tauri::image::Image<'static>> {
+    tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn toggle_tray_panel(app: &tauri::AppHandle) {
     use tauri::Manager;
     use tauri_plugin_positioner::{Position, WindowExt};
 
@@ -917,24 +922,14 @@ fn toggle_macos_panel(app: &tauri::AppHandle) {
 }
 
 #[cfg(target_os = "macos")]
-fn load_tray_icon() -> tauri::Result<tauri::image::Image<'static>> {
-    tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))
-}
-
-#[cfg(target_os = "macos")]
 fn macos_menu_click() -> bool {
     use objc2_app_kit::{NSEvent, NSEventModifierFlags};
 
     NSEvent::modifierFlags_class().contains(NSEventModifierFlags::Control)
 }
 
-#[cfg(target_os = "macos")]
-fn show_tray_menu<R: tauri::Runtime>(tray: &tauri::tray::TrayIcon<R>) {
-    let _ = tray.with_inner_tray_icon(|inner| inner.show_menu());
-}
-
-#[cfg(target_os = "macos")]
-fn setup_macos_tray(app: &tauri::App) -> tauri::Result<()> {
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     use tauri::{
         Manager,
         menu::{Menu, MenuItem},
@@ -945,17 +940,22 @@ fn setup_macos_tray(app: &tauri::App) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&quit])?;
 
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_visible_on_all_workspaces(true);
+        #[cfg(target_os = "macos")]
+        {
+            let _ = window.set_visible_on_all_workspaces(true);
+        }
         let _ = window.hide();
     }
 
-    let _ = app.handle().set_dock_visibility(false)?;
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.handle().set_dock_visibility(false)?;
+    }
 
     let icon = load_tray_icon()?;
 
-    let tray = TrayIconBuilder::new()
+    let mut builder = TrayIconBuilder::new()
         .icon(icon)
-        .icon_as_template(true)
         .tooltip("Evidence GIF Converter")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -972,17 +972,35 @@ fn setup_macos_tray(app: &tauri::App) -> tauri::Result<()> {
                 ..
             } = event
             {
-                let open_menu = matches!(button, MouseButton::Right)
-                    || (matches!(button, MouseButton::Left) && macos_menu_click());
+                let open_menu = match button {
+                    MouseButton::Right => true,
+                    MouseButton::Left => {
+                        #[cfg(target_os = "macos")]
+                        {
+                            macos_menu_click()
+                        }
+                        #[cfg(target_os = "windows")]
+                        {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
 
                 if open_menu {
-                    show_tray_menu(tray);
+                    let _ = tray.with_inner_tray_icon(|inner| inner.show_menu());
                 } else if matches!(button, MouseButton::Left) {
-                    toggle_macos_panel(tray.app_handle());
+                    toggle_tray_panel(tray.app_handle());
                 }
             }
-        })
-        .build(app)?;
+        });
+
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.icon_as_template(true);
+    }
+
+    let tray = builder.build(app)?;
 
     tray.with_inner_tray_icon(|inner| {
         inner.set_show_menu_on_left_click(false);
@@ -1006,15 +1024,15 @@ pub fn run() {
                 configure_platform_window(&window)?;
             }
 
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
                 app.handle().plugin(tauri_plugin_positioner::init())?;
-                setup_macos_tray(app)?;
+                setup_tray(app)?;
             }
             Ok(())
         })
         .on_window_event(|window, event| {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
@@ -1028,9 +1046,8 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|_app, event| {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
-                // Keep the app alive for tray-only usage, but allow explicit Quit.
                 if code.is_none() {
                     api.prevent_exit();
                 }

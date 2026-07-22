@@ -52,7 +52,7 @@ export async function initPlatformWindow(): Promise<AppPlatform> {
 
   const window = getCurrentWindow();
 
-  if (platform === "macos") {
+  if (platform === "macos" || platform === "windows") {
     await window.onCloseRequested(async (event) => {
       event.preventDefault();
       await window.hide();
@@ -63,13 +63,5 @@ export async function initPlatformWindow(): Promise<AppPlatform> {
 }
 
 export async function hideAppWindow(): Promise<void> {
-  const platform = detectPlatform();
-  const window = getCurrentWindow();
-
-  if (platform === "macos") {
-    await window.hide();
-    return;
-  }
-
-  await window.close();
+  await getCurrentWindow().hide();
 }
