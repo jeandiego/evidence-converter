@@ -624,7 +624,7 @@ fn convert_videos_inner(
 
                 match upload_result {
                     Ok(()) => {
-                        cleanup_temp_gif(&output_path, &output_dir);
+                        cleanup_temp_gif(&output_path);
                         ok_count += 1;
                         let result = ConvertResult {
                             name: name.clone(),
@@ -670,7 +670,7 @@ fn convert_videos_inner(
     }
 
     if destination == ConvertDestination::Businessmap {
-        cleanup_temp_dir_if_empty(&output_dir);
+        cleanup_batch_temp_dir(&output_dir);
     }
 
     let destination_label = if destination == ConvertDestination::Businessmap {
@@ -716,9 +716,20 @@ fn post_attachment_to_businessmap(
     )
 }
 
-fn cleanup_temp_gif(gif_path: &Path, temp_dir: &Path) {
+fn cleanup_temp_gif(gif_path: &Path) {
     let _ = fs::remove_file(gif_path);
-    cleanup_temp_dir_if_empty(temp_dir);
+}
+
+fn cleanup_batch_temp_dir(dir: &Path) {
+    if !dir.is_dir() {
+        return;
+    }
+    let _ = fs::remove_dir_all(dir);
+    if let Some(parent) = dir.parent() {
+        if parent.file_name().and_then(|n| n.to_str()) == Some("evidence-cvt") {
+            cleanup_temp_dir_if_empty(parent);
+        }
+    }
 }
 
 fn cleanup_temp_dir_if_empty(dir: &Path) {
@@ -1094,6 +1105,27 @@ mod tests {
             max_colors: 1,
         })
         .is_err());
+    }
+
+    #[test]
+    fn cleanup_temp_gif_keeps_batch_dir_for_remaining_files() {
+        let batch_dir = std::env::temp_dir().join("evidence-cvt-cleanup-test");
+        let _ = fs::remove_dir_all(&batch_dir);
+        fs::create_dir_all(&batch_dir).unwrap();
+
+        let first = batch_dir.join("first.gif");
+        let second = batch_dir.join("second.gif");
+        fs::write(&first, b"GIF89a").unwrap();
+        fs::write(&second, b"GIF89a").unwrap();
+
+        cleanup_temp_gif(&first);
+
+        assert!(!first.exists());
+        assert!(second.exists());
+        assert!(batch_dir.is_dir());
+
+        cleanup_batch_temp_dir(&batch_dir);
+        assert!(!batch_dir.exists());
     }
 
     #[test]
