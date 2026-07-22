@@ -1,7 +1,7 @@
 {
   "name": "evidence-cvt",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,7 +15,8 @@
     "tauri:build": "bun run download-ffmpeg:mac && bun tauri build",
     "tauri:build:mac": "bun run download-ffmpeg:mac && bun tauri build && node scripts/collect-releases.mjs",
     "tauri:build:windows": "bun run download-ffmpeg:windows && bun tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis && node scripts/collect-releases.mjs",
-    "tauri:build:all": "bun run download-ffmpeg:all && bun run tauri:build:mac && bun run tauri:build:windows"
+    "tauri:build:all": "bun run download-ffmpeg:all && bun run tauri:build:mac && bun run tauri:build:windows",
+    "bump": "node scripts/bump-version.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

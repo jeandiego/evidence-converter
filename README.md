@@ -67,13 +67,15 @@ The app runs from the menu bar / tray and does not appear in the Dock on macOS.
 
 ### Publish a new release (maintainers)
 
-1. Bump the version in `package.json` and `src-tauri/tauri.conf.json` (and `src-tauri/Cargo.toml` if needed).
-2. Commit, then tag and push:
+1. Bump the version (updates `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`):
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+bun run bump          # patch: 0.1.0 -> 0.1.1
+bun run bump minor    # 0.1.0 -> 0.2.0
+bun run bump 1.0.0    # set exact version
 ```
+
+2. Commit, tag, and push (the bump script prints the exact commands).
 
 3. GitHub Actions builds macOS and Windows installers and attaches them to the release (workflow: `.github/workflows/release.yml`).
 
