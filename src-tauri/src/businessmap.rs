@@ -255,13 +255,12 @@ pub fn upload_file(
         .ok_or_else(|| "Upload succeeded but no file link was returned".to_string())
 }
 
-pub fn post_comment_with_attachment(
+pub fn post_comment_with_attachments(
     base_url: &str,
     api_key: &str,
     card_id: u64,
     text: &str,
-    file_name: &str,
-    link: &str,
+    attachments: &[(String, String)],
 ) -> Result<(), String> {
     let base = normalize_base_url(base_url)?;
     let api_key = api_key.trim();
@@ -271,12 +270,21 @@ pub fn post_comment_with_attachment(
     if text.trim().is_empty() {
         return Err("Comment text cannot be empty".to_string());
     }
+    if attachments.is_empty() {
+        return Err("At least one attachment is required".to_string());
+    }
 
     let client = http_client()?;
     let url = format!("{base}/api/v2/cards/{card_id}/comments");
     let payload = CommentCreateBody {
         text,
-        attachments_to_add: vec![CommentAttachment { file_name, link }],
+        attachments_to_add: attachments
+            .iter()
+            .map(|(file_name, link)| CommentAttachment {
+                file_name: file_name.as_str(),
+                link: link.as_str(),
+            })
+            .collect(),
     };
 
     let response = client
@@ -298,6 +306,23 @@ pub fn post_comment_with_attachment(
     }
 
     Ok(())
+}
+
+pub fn post_comment_with_attachment(
+    base_url: &str,
+    api_key: &str,
+    card_id: u64,
+    text: &str,
+    file_name: &str,
+    link: &str,
+) -> Result<(), String> {
+    post_comment_with_attachments(
+        base_url,
+        api_key,
+        card_id,
+        text,
+        &[(file_name.to_string(), link.to_string())],
+    )
 }
 
 #[cfg(test)]
@@ -334,6 +359,14 @@ mod tests {
         assert_eq!(
             render_comment_template("Evidence: {filename}", "clip.gif"),
             "Evidence: clip.gif"
+        );
+    }
+
+    #[test]
+    fn render_comment_template_supports_batch_filenames() {
+        assert_eq!(
+            render_comment_template("Evidence: {filename}", "a.gif, b.mp4"),
+            "Evidence: a.gif, b.mp4"
         );
     }
 }

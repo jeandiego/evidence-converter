@@ -16,6 +16,7 @@ import "./App.css";
 type TabId = "convert" | "preferences";
 type DestinationId = "local" | "businessmap";
 type QueueStatus = "pending" | "converting" | "uploading" | "done" | "error";
+type VideoOutputFormat = "gif" | "mov" | "mp4" | "webm";
 
 type QueueItem = {
   path: string;
@@ -24,6 +25,7 @@ type QueueItem = {
   error?: string;
   outputPath?: string;
   filePercent?: number;
+  outputFormat?: VideoOutputFormat;
 };
 
 type FfmpegStatus = {
@@ -43,6 +45,7 @@ type ConvertBatchFinished = {
   destination: DestinationId;
   cardId?: number | null;
   cardUrl?: string | null;
+  commentError?: string | null;
 };
 
 type ConvertFileUploading = {
@@ -91,6 +94,7 @@ const FFMPEG_WIDTH_KEY = "ffmpegWidth";
 const FFMPEG_MAX_COLORS_KEY = "ffmpegMaxColors";
 const BM_API_KEY = "businessmapApiKey";
 const BM_BASE_URL_KEY = "businessmapBaseUrl";
+const BM_BOARD_ID_KEY = "businessmapBoardId";
 const BM_COMMENT_TEMPLATE_KEY = "businessmapCommentTemplate";
 const DEFAULT_BM_BASE_URL = "https://dasa.businessmap.io";
 const DEFAULT_BM_COMMENT_TEMPLATE = "{filename}";
@@ -146,25 +150,40 @@ function isCompleteCardPath(path: string): boolean {
   return parseBoardIdFromPath(path) !== null && parseCardIdFromPath(path) !== null;
 }
 
-function getCompleteCardPath(raw: string): string | null {
+function buildCardPath(boardId: string, cardId: string): string | null {
+  const board = boardId.trim();
+  const card = cardId.trim();
+  if (!board || !card || !/^\d+$/.test(board) || !/^\d+$/.test(card)) {
+    return null;
+  }
+  return `ctrl_board/${board}/cards/${card}/`;
+}
+
+function parsePastedCardPath(raw: string): { boardId: string; cardId: string } | null {
   const normalized = normalizeCardPathInput(raw);
   if (!normalized || !isCompleteCardPath(normalized)) return null;
-  return normalized;
+  const board = parseBoardIdFromPath(normalized);
+  const card = parseCardIdFromPath(normalized);
+  if (board === null || card === null) return null;
+  return { boardId: String(board), cardId: String(card) };
+}
+
+function sanitizeIdInput(raw: string): string {
+  return raw.replace(/\D/g, "");
+}
+
+function buildCardPageUrl(baseUrl: string, boardId: string, cardId: string): string | null {
+  const cardPath = buildCardPath(boardId, cardId);
+  if (!cardPath) return null;
+  return `${baseUrl.replace(/\/+$/, "")}/${cardPath.replace(/\/+$/, "")}/`;
 }
 
 function buildCardCommentsPageUrl(baseUrl: string, cardPath: string): string {
-  const normalized = getCompleteCardPath(cardPath);
-  if (!normalized) {
+  const normalized = normalizeCardPathInput(cardPath);
+  if (!normalized || !isCompleteCardPath(normalized)) {
     return baseUrl.replace(/\/+$/, "");
   }
   return `${baseUrl.replace(/\/+$/, "")}/${normalized.replace(/\/+$/, "")}/comments`;
-}
-
-function handleCardPathInput(raw: string): string {
-  if (/^https?:\/\//i.test(raw) || /businessmap\.io/i.test(raw)) {
-    return normalizeCardPathInput(raw) ?? raw;
-  }
-  return raw.replace(/\/comments\/?.*$/i, "");
 }
 
 const DEFAULT_FFMPEG_CONFIG: FfmpegConfig = {
@@ -215,6 +234,78 @@ function overallPercent(progress: ConvertProgressState): number {
   return Math.min(100, (completed / progress.total) * 100);
 }
 
+type ConvertButtonContext = {
+  converting: boolean;
+  destination: DestinationId;
+  pendingCount: number;
+  imagesOnly: boolean;
+};
+
+const CONVERT_BUTTON_LABELS = {
+  local: {
+    idle: "Convert",
+    ready: (count: number) => `Convert ${count}`,
+    busy: "Converting…",
+  },
+  businessmap: {
+    mixed: {
+      idle: "Convert & post",
+      ready: (count: number) => `Convert & post ${count}`,
+      busy: "Converting & posting…",
+    },
+    imagesOnly: {
+      idle: "Post",
+      ready: (count: number) => `Post ${count}`,
+      busy: "Posting…",
+    },
+  },
+} as const;
+
+function getConvertButtonLabel({
+  converting,
+  destination,
+  pendingCount,
+  imagesOnly,
+}: ConvertButtonContext): string {
+  const phase = converting ? "busy" : pendingCount > 0 ? "ready" : "idle";
+
+  if (destination === "local") {
+    const labels = CONVERT_BUTTON_LABELS.local;
+    if (phase === "ready") return labels.ready(pendingCount);
+    return labels[phase];
+  }
+
+  const labels = imagesOnly
+    ? CONVERT_BUTTON_LABELS.businessmap.imagesOnly
+    : CONVERT_BUTTON_LABELS.businessmap.mixed;
+  if (phase === "ready") return labels.ready(pendingCount);
+  return labels[phase];
+}
+
+function getQueueStatusLabel(item: QueueItem): string {
+  if (item.status === "converting" && item.filePercent != null) {
+    return `${Math.round(item.filePercent)}%`;
+  }
+  if (item.status === "uploading") return "post";
+  return item.status;
+}
+
+function canRemoveQueueItem(item: QueueItem, converting: boolean): boolean {
+  return (
+    !converting &&
+    item.status !== "converting" &&
+    item.status !== "uploading"
+  );
+}
+
+function isQueueItemFormatEditable(item: QueueItem): boolean {
+  return isVideoPath(item.path) && (item.status === "pending" || item.status === "error");
+}
+
+function shouldShowQueueStatusBadge(item: QueueItem): boolean {
+  return item.status !== "pending";
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState<TabId>("convert");
   const [outputDir, setOutputDir] = useState<string>("");
@@ -229,7 +320,8 @@ function App() {
   const [isMacos] = useState(isMacosPlatform);
   const [isWindows] = useState(isWindowsPlatform);
   const [destination, setDestination] = useState<DestinationId>("local");
-  const [cardUrl, setCardUrl] = useState("");
+  const [boardId, setBoardId] = useState("");
+  const [cardId, setCardId] = useState("");
   const [bmApiKey, setBmApiKey] = useState("");
   const [bmBaseUrl, setBmBaseUrl] = useState(DEFAULT_BM_BASE_URL);
   const [bmCommentTemplate, setBmCommentTemplate] = useState(DEFAULT_BM_COMMENT_TEMPLATE);
@@ -284,9 +376,11 @@ function App() {
 
       const savedBmApiKey = await settings.get<string>(BM_API_KEY);
       const savedBmBaseUrl = await settings.get<string>(BM_BASE_URL_KEY);
+      const savedBmBoardId = await settings.get<string>(BM_BOARD_ID_KEY);
       const savedBmTemplate = await settings.get<string>(BM_COMMENT_TEMPLATE_KEY);
       if (savedBmApiKey) setBmApiKey(savedBmApiKey);
       if (savedBmBaseUrl) setBmBaseUrl(savedBmBaseUrl);
+      if (savedBmBoardId) setBoardId(savedBmBoardId);
       if (savedBmTemplate) setBmCommentTemplate(savedBmTemplate);
     }
 
@@ -402,12 +496,25 @@ function App() {
 
       unlisteners.push(
         await listen<ConvertBatchFinished>("convert-batch-finished", (event) => {
-          const { ok, failed, destination: dest, cardUrl: finishedCardUrl } = event.payload;
+          const {
+            ok,
+            failed,
+            destination: dest,
+            cardUrl: finishedCardUrl,
+            commentError,
+          } = event.payload;
           setConverting(false);
           setProgress(null);
+          setCardId("");
 
           if (dest === "businessmap") {
-            if (failed === 0) {
+            if (commentError) {
+              setNotice(
+                failed === 0
+                  ? `Uploaded ${ok} file${ok === 1 ? "" : "s"}, but comment failed: ${commentError}`
+                  : `Uploaded ${ok}, failed ${failed}. Comment failed: ${commentError}`,
+              );
+            } else if (failed === 0) {
               setNotice(`Posted ${ok} file${ok === 1 ? "" : "s"} to BusinessMap.`);
             } else {
               setNotice(`Posted ${ok}, failed ${failed} on BusinessMap.`);
@@ -458,6 +565,7 @@ function App() {
             path,
             name: fileName(path),
             status: "pending" as const,
+            ...(isVideoPath(path) ? { outputFormat: "gif" as const } : {}),
           }));
         return next.length ? [...prev, ...next] : prev;
       });
@@ -522,6 +630,16 @@ function App() {
       await store.set(FFMPEG_FPS_KEY, next.fps);
       await store.set(FFMPEG_WIDTH_KEY, next.width);
       await store.set(FFMPEG_MAX_COLORS_KEY, next.maxColors);
+      await store.save();
+    },
+    [store],
+  );
+
+  const persistBoardId = useCallback(
+    async (id: string) => {
+      setBoardId(id);
+      if (!store) return;
+      await store.set(BM_BOARD_ID_KEY, id);
       await store.save();
     },
     [store],
@@ -648,6 +766,44 @@ function App() {
     [queue],
   );
 
+  function updateItemOutputFormat(path: string, outputFormat: VideoOutputFormat) {
+    setQueue((prev) =>
+      prev.map((item) =>
+        item.path === path ? { ...item, outputFormat } : item,
+      ),
+    );
+  }
+
+  function handleBoardInput(raw: string) {
+    const parsed = parsePastedCardPath(raw);
+    if (parsed) {
+      void persistBoardId(parsed.boardId);
+      setCardId(parsed.cardId);
+      return;
+    }
+    void persistBoardId(sanitizeIdInput(raw));
+  }
+
+  function handleCardInput(raw: string) {
+    const parsed = parsePastedCardPath(raw);
+    if (parsed) {
+      void persistBoardId(parsed.boardId);
+      setCardId(parsed.cardId);
+      return;
+    }
+    setCardId(sanitizeIdInput(raw));
+  }
+
+  const cardPath = useMemo(
+    () => buildCardPath(boardId, cardId),
+    [boardId, cardId],
+  );
+
+  const cardPreviewUrl = useMemo(
+    () => buildCardPageUrl(bmBaseUrl.trim() || DEFAULT_BM_BASE_URL, boardId, cardId),
+    [bmBaseUrl, boardId, cardId],
+  );
+
   async function convert() {
     if (converting) return;
 
@@ -662,9 +818,8 @@ function App() {
     }
 
     if (destination === "businessmap") {
-      const normalizedPath = getCompleteCardPath(cardUrl);
-      if (!normalizedPath) {
-        setNotice("Enter full path with board: ctrl_board/99/cards/402794/");
+      if (!cardPath) {
+        setNotice("Enter board and card IDs, e.g. board 99 and card 402794.");
         return;
       }
       if (!bmApiKey.trim()) {
@@ -692,10 +847,13 @@ function App() {
 
     try {
       const normalizedCardPath =
-        destination === "businessmap" ? getCompleteCardPath(cardUrl) : null;
+        destination === "businessmap" ? cardPath : null;
 
       await invoke("convert_videos", {
-        paths: toConvert.map((item) => item.path),
+        items: toConvert.map((item) => ({
+          path: item.path,
+          outputFormat: item.outputFormat ?? "gif",
+        })),
         outputDir: destination === "local" ? outputDir : null,
         destination,
         businessmap:
@@ -716,33 +874,63 @@ function App() {
     }
   }
 
+  const missingBoardId =
+    destination === "businessmap" && boardId.trim().length === 0;
+  const missingCardId =
+    destination === "businessmap" && cardId.trim().length === 0;
+  const showCardTargetHint =
+    destination === "businessmap" &&
+    pendingCount > 0 &&
+    !converting &&
+    (missingBoardId || missingCardId);
+
+  const convertBlockedReason = useMemo(() => {
+    if (converting || pendingCount === 0) return null;
+    if (pendingHasVideos && !ffmpeg?.available) {
+      return ffmpeg?.message ?? "ffmpeg is not available.";
+    }
+    if (destination === "local" && !outputDir) {
+      return "Choose an output folder first.";
+    }
+    if (destination === "businessmap") {
+      if (missingBoardId && missingCardId) {
+        return "Enter board and card IDs to post.";
+      }
+      if (missingBoardId) return "Enter board ID to post.";
+      if (missingCardId) return "Enter card ID to post.";
+      if (!bmApiKey.trim()) {
+        return "Add your BusinessMap API key in Preferences.";
+      }
+    }
+    return null;
+  }, [
+    converting,
+    pendingCount,
+    pendingHasVideos,
+    ffmpeg,
+    destination,
+    outputDir,
+    missingBoardId,
+    missingCardId,
+    bmApiKey,
+  ]);
+
   const canConvert =
     pendingCount > 0 &&
     !converting &&
     (!pendingHasVideos || ffmpeg?.available) &&
     (destination === "local"
       ? Boolean(outputDir)
-      : Boolean(getCompleteCardPath(cardUrl) && bmApiKey.trim()));
-
-  const convertButtonLabel = converting
-    ? destination === "businessmap"
-      ? pendingHasImagesOnly
-        ? "Posting…"
-        : "Converting & posting…"
-      : "Converting…"
-    : pendingCount > 0
-      ? destination === "businessmap"
-        ? pendingHasImagesOnly
-          ? `Post ${pendingCount}`
-          : `Convert & post ${pendingCount}`
-        : `Convert ${pendingCount}`
-      : destination === "businessmap"
-        ? pendingHasImagesOnly
-          ? "Post"
-          : "Convert & post"
-        : "Convert";
+      : Boolean(cardPath && bmApiKey.trim()));
 
   const progressPercent = progress ? overallPercent(progress) : 0;
+
+  const convertButtonLabel = getConvertButtonLabel({
+    converting,
+    destination,
+    pendingCount,
+    imagesOnly: pendingHasImagesOnly,
+  });
 
   return (
     <main className={`app${isMacos ? " app-macos" : ""}${isWindows ? " app-windows" : ""}`}>
@@ -819,7 +1007,7 @@ function App() {
         </div>
       )}
       {activeTab === "convert" && (
-        <div className="tab-panel" role="tabpanel">
+        <div className="tab-panel tab-panel-convert" role="tabpanel">
           <section className="destination-row">
             <span className="label">Destination</span>
             <div className="destination-options" role="radiogroup" aria-label="Output destination">
@@ -861,33 +1049,68 @@ function App() {
               </button>
             </section>
           ) : (
-            <section className="card-url-row">
-              <label className="card-url-field">
-                {/* <span className="label">Card path</span> */}
-                <div className="card-url-combo">
-                  <span className="card-url-prefix" title={bmBaseUrl}>
-                    {(bmBaseUrl.trim() || DEFAULT_BM_BASE_URL).replace(/\/+$/, "").replace(/^https?:\/\//, "")}/
-                  </span>
+            <section
+              className={`card-url-row${showCardTargetHint ? " card-url-row-attention" : ""}`}
+              aria-describedby={showCardTargetHint ? "card-target-hint" : undefined}
+            >
+              <div className="card-url-field">
+                <div
+                  className={`card-url-combo card-url-combo-board${showCardTargetHint && missingBoardId ? " field-missing" : ""}`}
+                >
+                  <label htmlFor="board-input" className="card-url-prefix">Board</label>
                   <input
+                    id="board-input"
                     type="text"
-                    className="card-url-input"
-                    placeholder="ctrl_board/99/cards/402794/"
-                    value={cardUrl}
+                    inputMode="numeric"
+                    className="card-url-input card-url-input-board"
+                    placeholder="99"
+                    value={boardId}
                     disabled={converting}
-                    onChange={(event) => {
-                      setCardUrl(handleCardPathInput(event.target.value));
-                    }}
-                    onBlur={() => {
-                      const normalized = normalizeCardPathInput(cardUrl);
-                      if (normalized) setCardUrl(normalized);
-                    }}
+                    aria-invalid={showCardTargetHint && missingBoardId}
+                    onChange={(event) => handleBoardInput(event.target.value)}
                   />
                 </div>
+                <div
+                  className={`card-url-combo card-url-combo-card${showCardTargetHint && missingCardId ? " field-missing" : ""}`}
+                >
+                  <label htmlFor="card-input" className="card-url-prefix">Card</label>
+                  <input
+                    id="card-input"
+                    type="text"
+                    inputMode="numeric"
+                    className="card-url-input card-url-input-card"
+                    placeholder="402794"
+                    value={cardId}
+                    disabled={converting}
+                    aria-invalid={showCardTargetHint && missingCardId}
+                    onChange={(event) => handleCardInput(event.target.value)}
+                  />
+                </div>
+              </div>
+              {showCardTargetHint ? (
+                <p className="field-hint field-hint-error" id="card-target-hint" role="status">
+                  {missingBoardId && missingCardId
+                    ? "Board and card IDs are required to post."
+                    : missingBoardId
+                      ? "Board ID is required to post."
+                      : "Card ID is required to post."}
+                </p>
+              ) : cardPreviewUrl ? (
+                <button
+                  type="button"
+                  className="linkish card-url-preview"
+                  title="Open card in browser"
+                  onClick={() => {
+                    openUrl(cardPreviewUrl).catch(console.error);
+                  }}
+                >
+                  {cardPreviewUrl}
+                </button>
+              ) : (
                 <span className="pref-hint">
-                  Board required — ctrl_board/99/cards/402794/ 
-                  {/* (paste full URL ok; /comments added automatically). */}
+                  Enter board and card IDs to preview the card URL.
                 </span>
-              </label>
+              )}
             </section>
           )}
 
@@ -979,17 +1202,55 @@ function App() {
               <ul className="queue-list">
                 {queue.map((item) => (
                   <li key={item.path} className={`queue-item status-${item.status}`}>
-                    <div className="queue-item-main">
+                    <div className="queue-item-header">
                       <span className="queue-name" title={item.path}>
                         {item.name}
                       </span>
-                      <span className="queue-status">
-                        {item.status === "converting" && item.filePercent != null
-                          ? `${Math.round(item.filePercent)}%`
-                          : item.status === "uploading"
-                            ? "posting…"
-                            : item.status}
-                      </span>
+                      <div className="queue-item-toolbar">
+                        {isQueueItemFormatEditable(item) && (
+                          <select
+                            className="queue-format-select"
+                            aria-label={`Output format for ${item.name}`}
+                            value={item.outputFormat ?? "gif"}
+                            disabled={converting}
+                            onChange={(event) => {
+                              updateItemOutputFormat(
+                                item.path,
+                                event.target.value as VideoOutputFormat,
+                              );
+                            }}
+                          >
+                            <option value="gif">GIF</option>
+                            <option value="mov">MOV</option>
+                            <option value="mp4">MP4</option>
+                            <option value="webm">WEBM</option>
+                          </select>
+                        )}
+                        {shouldShowQueueStatusBadge(item) && (
+                          <span className={`queue-status-badge status-${item.status}`}>
+                            {getQueueStatusLabel(item)}
+                          </span>
+                        )}
+                        {canRemoveQueueItem(item, converting) && (
+                          <button
+                            type="button"
+                            className="queue-remove"
+                            aria-label={`Remove ${item.name}`}
+                            onClick={() => removeItem(item.path)}
+                          >
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              viewBox="0 0 24 24"
+                              width="14"
+                              height="14"
+                              fill="currentColor"
+                              aria-hidden="true"
+                            >
+                              <path d="M11.9997 10.5865L16.9495 5.63672L18.3637 7.05093L13.4139 12.0007L18.3637 16.9504L16.9495 18.3646L11.9997 13.4149L7.04996 18.3646L5.63574 16.9504L10.5855 12.0007L5.63574 7.05093L7.04996 5.63672L11.9997 10.5865Z" />
+                            </svg>
+                          </button>
+                        )}
+                      </div>
                     </div>
                     {item.status === "converting" && item.filePercent != null && (
                       <div
@@ -1012,15 +1273,6 @@ function App() {
                         → {fileName(item.outputPath)}
                       </p>
                     )}
-                    {item.status !== "converting" && item.status !== "uploading" && (
-                      <button
-                        type="button"
-                        className="linkish"
-                        onClick={() => removeItem(item.path)}
-                      >
-                        Remove
-                      </button>
-                    )}
                   </li>
                 ))}
               </ul>
@@ -1033,9 +1285,18 @@ function App() {
               className="primary"
               onClick={convert}
               disabled={!canConvert}
+              title={convertBlockedReason ?? undefined}
+              aria-describedby={
+                convertBlockedReason ? "convert-blocked-hint" : undefined
+              }
             >
               {convertButtonLabel}
             </button>
+            {convertBlockedReason && (
+              <p className="actions-hint" id="convert-blocked-hint" role="status">
+                {convertBlockedReason}
+              </p>
+            )}
           </footer>
         </div>
       )}

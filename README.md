@@ -22,10 +22,13 @@ Evidence GIF Converter is a productivity tool for QA, support, and engineering w
 
 **Convert tab**
 
-- **Save locally** — batch-convert videos to GIF in a folder you choose (handy for Azure PR descriptions and other tools).
-- **Post to BusinessMap** — convert videos (or upload `.jpg` / `.png` images as-is) and attach them as comments on a specific card.
+- **Save locally** — batch-convert videos to GIF, MP4, MOV, or WEBM in a folder you choose (handy for Azure PR descriptions and other tools).
+- **Post to BusinessMap** — convert videos (or upload `.jpg` / `.png` images as-is) and attach them as **one comment** on a specific card per batch.
+- Choose output format per video in the queue (GIF default; MOV, MP4, WEBM also supported).
+- Board ID is remembered between sessions; card ID clears after each batch so the next upload targets the right card.
 - Drag and drop files, or use **Add files…** to build a queue.
 - Watch per-file progress while FFmpeg runs; clear or remove items before converting.
+- Videos at 25 MB or larger are re-encoded automatically to reduce size while keeping reasonable quality.
 
 **Preferences tab**
 
@@ -38,7 +41,7 @@ Evidence GIF Converter is a productivity tool for QA, support, and engineering w
 1. **Launch the app** — it lives in the menu bar (macOS) or system tray (Windows). Click the icon to open the panel; right-click (or Ctrl+click on macOS) for **Quit**.
 2. **Choose a destination**
    - *Save locally*: pick an output folder, then add `.mov` / `.mp4` files.
-   - *Post to BusinessMap*: enter the card path, e.g. `ctrl_board/99/cards/402794/` (full board path required). Paste a full BusinessMap URL if you prefer — the app normalizes it.
+   - *Post to BusinessMap*: enter **board** and **card** IDs separately (e.g. board `99`, card `402794`). Board ID is saved for next time. Paste a full BusinessMap card URL into either field if you prefer — the app fills both IDs.
 3. **Add files** via drag-and-drop or **Add files…**.
 4. Click **Convert** (or **Convert & post** / **Post** when targeting BusinessMap).
 5. After a successful BusinessMap upload, use **Open card comments in browser** to jump to the card.
@@ -47,12 +50,12 @@ Default GIF settings are 10 fps, 480 px width, and 128 colors. Adjust them in **
 
 ## Supported formats
 
-| Destination | Input formats |
-|-------------|---------------|
-| Save locally | `.mov`, `.mp4` |
-| Post to BusinessMap | `.mov`, `.mp4`, `.jpg`, `.jpeg`, `.png` |
+| Destination | Input formats | Video output |
+|-------------|---------------|--------------|
+| Save locally | `.mov`, `.mp4` | GIF (default), MP4, MOV, or WEBM per file |
+| Post to BusinessMap | `.mov`, `.mp4`, `.jpg`, `.jpeg`, `.png` | GIF (default), MP4, MOV, or WEBM per video; images uploaded as-is |
 
-Videos are converted to GIF. Images are uploaded directly without conversion.
+Each batch posts a **single BusinessMap comment** with all attachments from that run. The comment template `{filename}` lists every file name in the batch.
 
 ## Install (teammates)
 
@@ -64,6 +67,14 @@ Download the latest installers from **[GitHub Releases](../../releases)** — sa
 | **Windows** | `evidence-cvt_*_x64-setup.exe` | Run the NSIS installer |
 
 The app runs from the menu bar / tray and does not appear in the Dock on macOS.
+
+### macOS: “app is damaged” message
+
+If macOS blocks the app after install, remove the download quarantine flag and open it again:
+
+```bash
+xattr -cr "/Applications/Evidence Converter.app"
+```
 
 ### Publish a new release (maintainers)
 

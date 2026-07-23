@@ -15,6 +15,7 @@ use tauri_plugin_shell::ShellExt;
 
 const TOOL_UNAVAILABLE: &str =
     "Bundled ffmpeg is unavailable. Reinstall the app or contact support.";
+const VIDEO_MAX_BYTES: u64 = 25 * 1024 * 1024;
 
 struct ToolPaths {
     ffmpeg: PathBuf,
@@ -146,6 +147,7 @@ struct ConvertBatchFinished {
     destination: String,
     card_id: Option<u64>,
     card_url: Option<String>,
+    comment_error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -164,6 +166,29 @@ enum ConvertDestination {
     Businessmap,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum VideoOutputFormat {
+    Gif,
+    Mov,
+    Mp4,
+    Webm,
+}
+
+impl Default for VideoOutputFormat {
+    fn default() -> Self {
+        Self::Gif
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConvertItem {
+    path: String,
+    #[serde(default)]
+    output_format: VideoOutputFormat,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BusinessmapOptions {
@@ -171,6 +196,11 @@ struct BusinessmapOptions {
     api_key: String,
     base_url: String,
     comment_template: String,
+}
+
+struct BatchAttachment {
+    file_name: String,
+    link: String,
 }
 
 fn validate_config(config: &FfmpegConfig) -> Result<(), String> {
@@ -197,6 +227,45 @@ fn build_gif_filter(config: &FfmpegConfig) -> String {
         "fps={},scale={}:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors={}[p];[s1][p]paletteuse",
         config.fps, config.width, config.max_colors
     )
+}
+
+fn build_gif_filter_with_overrides(width: u32, fps: u32, max_colors: u32) -> String {
+    format!(
+        "fps={},scale={}:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors={}[p];[s1][p]paletteuse",
+        fps, width, max_colors
+    )
+}
+
+fn build_scale_fps_filter(fps: u32, width: u32) -> String {
+    format!("fps={},scale={}:-1:flags=lanczos", fps, width)
+}
+
+fn output_extension(format: VideoOutputFormat) -> &'static str {
+    match format {
+        VideoOutputFormat::Gif => "gif",
+        VideoOutputFormat::Mov => "mov",
+        VideoOutputFormat::Mp4 => "mp4",
+        VideoOutputFormat::Webm => "webm",
+    }
+}
+
+fn output_mime_type(format: VideoOutputFormat) -> &'static str {
+    match format {
+        VideoOutputFormat::Gif => "image/gif",
+        VideoOutputFormat::Mov => "video/quicktime",
+        VideoOutputFormat::Mp4 => "video/mp4",
+        VideoOutputFormat::Webm => "video/webm",
+    }
+}
+
+fn file_size_bytes(path: &Path) -> Result<u64, String> {
+    fs::metadata(path)
+        .map(|meta| meta.len())
+        .map_err(|e| format!("Failed to read file size: {e}"))
+}
+
+fn scaled_width(base_width: u32, factor: f32) -> u32 {
+    ((base_width as f32 * factor).round() as u32).max(1)
 }
 
 fn is_supported_video(path: &Path) -> bool {
@@ -264,18 +333,46 @@ fn run_ffmpeg_with_progress(
     total: usize,
     name: &str,
 ) -> Result<(), String> {
+    run_ffmpeg_args_with_progress(
+        tools,
+        app,
+        input_path,
+        output_path,
+        index,
+        total,
+        name,
+        &[
+            "-vf".to_string(),
+            filter.to_string(),
+        ],
+    )
+}
+
+fn run_ffmpeg_args_with_progress(
+    tools: &ToolPaths,
+    app: Option<&AppHandle>,
+    input_path: &str,
+    output_path: &str,
+    index: usize,
+    total: usize,
+    name: &str,
+    encode_args: &[String],
+) -> Result<(), String> {
+    let mut args = vec![
+        "-y".to_string(),
+        "-i".to_string(),
+        input_path.to_string(),
+    ];
+    args.extend_from_slice(encode_args);
+    args.extend([
+        "-progress".to_string(),
+        "pipe:1".to_string(),
+        "-nostats".to_string(),
+        output_path.to_string(),
+    ]);
+
     let mut child = Command::new(&tools.ffmpeg)
-        .args([
-            "-y",
-            "-i",
-            input_path,
-            "-vf",
-            filter,
-            "-progress",
-            "pipe:1",
-            "-nostats",
-            output_path,
-        ])
+        .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -395,25 +492,173 @@ fn check_ffmpeg(app: AppHandle) -> FfmpegStatus {
     }
 }
 
-fn paths_need_ffmpeg(paths: &[String]) -> bool {
-    paths.iter().any(|path_str| {
-        is_supported_video(Path::new(path_str))
-    })
+fn paths_need_ffmpeg(items: &[ConvertItem]) -> bool {
+    items.iter().any(|item| is_supported_video(Path::new(&item.path)))
+}
+
+fn build_video_encode_args(
+    format: VideoOutputFormat,
+    config: &FfmpegConfig,
+    width: u32,
+    crf: u32,
+) -> Vec<String> {
+    let filter = build_scale_fps_filter(config.fps, width);
+    match format {
+        VideoOutputFormat::Gif => vec![
+            "-vf".to_string(),
+            build_gif_filter_with_overrides(width, config.fps, config.max_colors),
+        ],
+        VideoOutputFormat::Mp4 | VideoOutputFormat::Mov => vec![
+            "-vf".to_string(),
+            filter,
+            "-c:v".to_string(),
+            "libx264".to_string(),
+            "-crf".to_string(),
+            crf.to_string(),
+            "-preset".to_string(),
+            "medium".to_string(),
+            "-movflags".to_string(),
+            "+faststart".to_string(),
+            "-an".to_string(),
+        ],
+        VideoOutputFormat::Webm => vec![
+            "-vf".to_string(),
+            filter,
+            "-c:v".to_string(),
+            "libvpx-vp9".to_string(),
+            "-crf".to_string(),
+            crf.to_string(),
+            "-b:v".to_string(),
+            "0".to_string(),
+            "-an".to_string(),
+        ],
+    }
+}
+
+fn convert_video_to_output(
+    tools: &ToolPaths,
+    app: Option<&AppHandle>,
+    input_path: &str,
+    output_path: &Path,
+    format: VideoOutputFormat,
+    config: &FfmpegConfig,
+    width: u32,
+    crf: u32,
+    index: usize,
+    total: usize,
+    name: &str,
+) -> Result<(), String> {
+    let output_path_str = output_path.to_string_lossy().to_string();
+    let encode_args = build_video_encode_args(format, config, width, crf);
+    run_ffmpeg_args_with_progress(
+        tools,
+        app,
+        input_path,
+        &output_path_str,
+        index,
+        total,
+        name,
+        &encode_args,
+    )
+}
+
+fn ensure_output_under_limit(
+    tools: &ToolPaths,
+    app: Option<&AppHandle>,
+    input_path: &str,
+    output_path: &Path,
+    format: VideoOutputFormat,
+    config: &FfmpegConfig,
+    index: usize,
+    total: usize,
+    name: &str,
+) -> Result<(), String> {
+    if file_size_bytes(output_path)? < VIDEO_MAX_BYTES {
+        return Ok(());
+    }
+
+    let retry_attempts: Vec<(u32, u32, u32)> = match format {
+        VideoOutputFormat::Gif => vec![
+            (
+                scaled_width(config.width, 0.85),
+                config.fps.max(8),
+                (config.max_colors / 2).max(2),
+            ),
+            (
+                scaled_width(config.width, 0.7),
+                config.fps.max(8),
+                (config.max_colors / 4).max(2),
+            ),
+        ],
+        VideoOutputFormat::Mp4 | VideoOutputFormat::Mov => vec![
+            (scaled_width(config.width, 0.85), 28, 0),
+            (scaled_width(config.width, 0.7), 32, 0),
+        ],
+        VideoOutputFormat::Webm => vec![
+            (scaled_width(config.width, 0.85), 35, 0),
+            (scaled_width(config.width, 0.7), 40, 0),
+        ],
+    };
+
+    for (width, crf_or_colors, max_colors) in retry_attempts {
+        let _ = fs::remove_file(output_path);
+
+        let encode_result = if format == VideoOutputFormat::Gif {
+            let filter = build_gif_filter_with_overrides(
+                width,
+                config.fps.max(8),
+                max_colors,
+            );
+            run_ffmpeg_with_progress(
+                tools,
+                app,
+                input_path,
+                &output_path.to_string_lossy(),
+                &filter,
+                index,
+                total,
+                name,
+            )
+        } else {
+            convert_video_to_output(
+                tools,
+                app,
+                input_path,
+                output_path,
+                format,
+                config,
+                width,
+                crf_or_colors,
+                index,
+                total,
+                name,
+            )
+        };
+
+        encode_result?;
+
+        if file_size_bytes(output_path)? < VIDEO_MAX_BYTES {
+            return Ok(());
+        }
+    }
+
+    Ok(())
 }
 
 fn convert_videos_inner(
     app: AppHandle,
     tools: Option<ToolPaths>,
-    paths: Vec<String>,
+    items: Vec<ConvertItem>,
     output_dir: PathBuf,
     config: FfmpegConfig,
     destination: ConvertDestination,
     businessmap: Option<BusinessmapOptions>,
 ) {
-    let filter = build_gif_filter(&config);
-    let total = paths.len();
+    let total = items.len();
     let mut ok_count = 0usize;
     let mut failed_count = 0usize;
+    let mut batch_attachments: Vec<BatchAttachment> = Vec::new();
+    let mut batch_upload_names: Vec<String> = Vec::new();
 
     let bm_config = if destination == ConvertDestination::Businessmap {
         let options = businessmap.as_ref().expect("BusinessMap options required");
@@ -437,7 +682,9 @@ fn convert_videos_inner(
         ConvertBatchStarted { total },
     );
 
-    for (index, path_str) in paths.into_iter().enumerate() {
+    for (index, item) in items.into_iter().enumerate() {
+        let path_str = item.path;
+        let output_format = item.output_format;
         let input = PathBuf::from(&path_str);
         let name = input
             .file_name()
@@ -470,9 +717,6 @@ fn convert_videos_inner(
         if images::is_supported_image(&input) {
             match destination {
                 ConvertDestination::Businessmap => {
-                    let bm = bm_config.as_ref().expect("BusinessMap config");
-                    let card_id = businessmap::parse_card_id(&bm.card_url).unwrap_or(0);
-
                     let _ = app.emit(
                         "convert-file-uploading",
                         ConvertFileUploading {
@@ -485,15 +729,19 @@ fn convert_videos_inner(
 
                     match images::prepare_image_for_upload(&input) {
                         Ok((bytes, upload_name, mime_type)) => {
-                            match post_attachment_to_businessmap(
-                                bm,
-                                card_id,
+                            match upload_to_businessmap(
+                                bm_config.as_ref().expect("BusinessMap config"),
                                 &upload_name,
                                 mime_type,
                                 &bytes,
                             ) {
-                                Ok(()) => {
+                                Ok(link) => {
                                     ok_count += 1;
+                                    batch_upload_names.push(upload_name.clone());
+                                    batch_attachments.push(BatchAttachment {
+                                        file_name: upload_name,
+                                        link,
+                                    });
                                     let result = ConvertResult {
                                         name: name.clone(),
                                         ok: true,
@@ -576,25 +824,60 @@ fn convert_videos_inner(
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("output");
-        let output_path = output_dir.join(format!("{stem}.gif"));
+        let ext = output_extension(output_format);
+        let output_path = output_dir.join(format!("{stem}.{ext}"));
         let output_path_str = output_path.to_string_lossy().to_string();
 
-        let convert_result = run_ffmpeg_with_progress(
-            &tools,
-            Some(&app),
-            &path_str,
-            &output_path_str,
-            &filter,
-            index,
-            total,
-            &name,
-        );
+        let initial_crf = match output_format {
+            VideoOutputFormat::Mp4 | VideoOutputFormat::Mov => 23,
+            VideoOutputFormat::Webm => 30,
+            VideoOutputFormat::Gif => 0,
+        };
+
+        let convert_result = if output_format == VideoOutputFormat::Gif {
+            run_ffmpeg_with_progress(
+                tools,
+                Some(&app),
+                &path_str,
+                &output_path_str,
+                &build_gif_filter(&config),
+                index,
+                total,
+                &name,
+            )
+        } else {
+            convert_video_to_output(
+                tools,
+                Some(&app),
+                &path_str,
+                &output_path,
+                output_format,
+                &config,
+                config.width,
+                initial_crf,
+                index,
+                total,
+                &name,
+            )
+        }
+        .and_then(|()| {
+            ensure_output_under_limit(
+                tools,
+                Some(&app),
+                &path_str,
+                &output_path,
+                output_format,
+                &config,
+                index,
+                total,
+                &name,
+            )
+        });
 
         match convert_result {
             Ok(()) if destination == ConvertDestination::Businessmap => {
                 let bm = bm_config.as_ref().expect("BusinessMap config");
-                let card_id = businessmap::parse_card_id(&bm.card_url).unwrap_or(0);
-                let gif_name = output_path
+                let upload_name = output_path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("evidence.gif")
@@ -611,21 +894,25 @@ fn convert_videos_inner(
                 );
 
                 let upload_result = fs::read(&output_path)
-                    .map_err(|e| format!("Failed to read GIF: {e}"))
+                    .map_err(|e| format!("Failed to read converted file: {e}"))
                     .and_then(|bytes| {
-                        post_attachment_to_businessmap(
+                        upload_to_businessmap(
                             bm,
-                            card_id,
-                            &gif_name,
-                            "image/gif",
+                            &upload_name,
+                            output_mime_type(output_format),
                             &bytes,
                         )
                     });
 
                 match upload_result {
-                    Ok(()) => {
+                    Ok(link) => {
                         cleanup_temp_gif(&output_path);
                         ok_count += 1;
+                        batch_upload_names.push(upload_name.clone());
+                        batch_attachments.push(BatchAttachment {
+                            file_name: upload_name,
+                            link,
+                        });
                         let result = ConvertResult {
                             name: name.clone(),
                             ok: true,
@@ -669,7 +956,28 @@ fn convert_videos_inner(
         }
     }
 
+    let mut comment_error = None;
     if destination == ConvertDestination::Businessmap {
+        if !batch_attachments.is_empty() {
+            let bm = bm_config.as_ref().expect("BusinessMap config");
+            let card_id = card_id.unwrap_or(0);
+            let filenames = batch_upload_names.join(", ");
+            let comment =
+                businessmap::render_comment_template(&bm.comment_template, &filenames);
+            let attachment_pairs: Vec<(String, String)> = batch_attachments
+                .iter()
+                .map(|item| (item.file_name.clone(), item.link.clone()))
+                .collect();
+            if let Err(error) = businessmap::post_comment_with_attachments(
+                &bm.base_url,
+                &bm.api_key,
+                card_id,
+                &comment,
+                &attachment_pairs,
+            ) {
+                comment_error = Some(error);
+            }
+        }
         cleanup_batch_temp_dir(&output_dir);
     }
 
@@ -687,32 +995,23 @@ fn convert_videos_inner(
             destination: destination_label,
             card_id,
             card_url,
+            comment_error,
         },
     );
 }
 
-fn post_attachment_to_businessmap(
+fn upload_to_businessmap(
     config: &BusinessmapConfig,
-    card_id: u64,
     file_name: &str,
     mime_type: &str,
     bytes: &[u8],
-) -> Result<(), String> {
-    let link = businessmap::upload_file(
+) -> Result<String, String> {
+    businessmap::upload_file(
         &config.base_url,
         &config.api_key,
         file_name,
         bytes,
         mime_type,
-    )?;
-    let comment = businessmap::render_comment_template(&config.comment_template, file_name);
-    businessmap::post_comment_with_attachment(
-        &config.base_url,
-        &config.api_key,
-        card_id,
-        &comment,
-        file_name,
-        &link,
     )
 }
 
@@ -774,7 +1073,7 @@ fn test_businessmap_connection(base_url: String, api_key: String) -> Result<Stri
 #[tauri::command]
 async fn convert_videos(
     app: AppHandle,
-    paths: Vec<String>,
+    items: Vec<ConvertItem>,
     output_dir: Option<String>,
     destination: ConvertDestination,
     businessmap: Option<BusinessmapOptions>,
@@ -782,7 +1081,7 @@ async fn convert_videos(
 ) -> Result<(), String> {
     validate_config(&config)?;
 
-    if paths.is_empty() {
+    if items.is_empty() {
         return Err("No files to convert".to_string());
     }
 
@@ -809,7 +1108,7 @@ async fn convert_videos(
         }
     };
 
-    let tools = if paths_need_ffmpeg(&paths) {
+    let tools = if paths_need_ffmpeg(&items) {
         Some(resolve_tools(&app)?)
     } else {
         None
@@ -819,7 +1118,7 @@ async fn convert_videos(
         convert_videos_inner(
             app,
             tools,
-            paths,
+            items,
             out_dir,
             config,
             destination,
