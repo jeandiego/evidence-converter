@@ -46,6 +46,8 @@ type ConvertBatchFinished = {
   cardId?: number | null;
   cardUrl?: string | null;
   commentError?: string | null;
+  cancelled?: boolean;
+  skipped?: number;
 };
 
 type ConvertFileUploading = {
@@ -502,10 +504,42 @@ function App() {
             destination: dest,
             cardUrl: finishedCardUrl,
             commentError,
+            cancelled,
+            skipped = 0,
           } = event.payload;
           setConverting(false);
           setProgress(null);
           setCardId("");
+
+          if (cancelled) {
+            if (dest === "businessmap") {
+              if (commentError) {
+                setNotice(
+                  `Cancelled. Posted comment with ${ok} uploaded file${ok === 1 ? "" : "s"}, but comment failed: ${commentError}`,
+                );
+              } else if (ok > 0) {
+                setNotice(
+                  `Cancelled. Posted comment with ${ok} uploaded file${ok === 1 ? "" : "s"}.`,
+                );
+              } else {
+                setNotice(
+                  skipped > 0
+                    ? `Cancelled before any files were posted. ${skipped} file${skipped === 1 ? "" : "s"} remaining.`
+                    : "Cancelled.",
+                );
+              }
+              if (finishedCardUrl) {
+                setLastCardLink(buildCardCommentsPageUrl(bmBaseUrl, finishedCardUrl));
+              }
+            } else {
+              setNotice(
+                skipped > 0
+                  ? `Cancelled after converting ${ok} file${ok === 1 ? "" : "s"}. ${skipped} remaining.`
+                  : `Cancelled after converting ${ok} file${ok === 1 ? "" : "s"}.`,
+              );
+            }
+            return;
+          }
 
           if (dest === "businessmap") {
             if (commentError) {
@@ -542,6 +576,8 @@ function App() {
 
   const addPaths = useCallback(
     (paths: string[]) => {
+      if (converting) return;
+
       const accepted = paths.filter((path) => isAcceptedPath(path, destination));
       const skipped = paths.length - accepted.length;
 
@@ -570,7 +606,7 @@ function App() {
         return next.length ? [...prev, ...next] : prev;
       });
     },
-    [destination],
+    [destination, converting],
   );
 
   useEffect(() => {
@@ -701,6 +737,8 @@ function App() {
   }
 
   async function addFiles() {
+    if (converting) return;
+
     const selected = await open({
       multiple: true,
       filters: [
@@ -803,6 +841,14 @@ function App() {
     () => buildCardPageUrl(bmBaseUrl.trim() || DEFAULT_BM_BASE_URL, boardId, cardId),
     [bmBaseUrl, boardId, cardId],
   );
+
+  async function cancelBatch() {
+    try {
+      await invoke("cancel_convert_batch");
+    } catch (err) {
+      setNotice(String(err));
+    }
+  }
 
   async function convert() {
     if (converting) return;
@@ -924,6 +970,9 @@ function App() {
       : Boolean(cardPath && bmApiKey.trim()));
 
   const progressPercent = progress ? overallPercent(progress) : 0;
+  const businessmapProcessing =
+    converting && destination === "businessmap" && progress?.active === true;
+  const convertLockedClass = businessmapProcessing ? " convert-locked" : "";
 
   const convertButtonLabel = getConvertButtonLabel({
     converting,
@@ -931,6 +980,44 @@ function App() {
     pendingCount,
     imagesOnly: pendingHasImagesOnly,
   });
+
+  const progressPanel = progress?.active ? (
+    <section className="progress-panel" aria-live="polite">
+      <div className="progress-header">
+        <span className="progress-label">
+          {progress.fileName
+            ? destination === "businessmap"
+              ? `Processing ${progress.current + 1} of ${progress.total}: ${progress.fileName}`
+              : `Converting ${progress.current + 1} of ${progress.total}: ${progress.fileName}`
+            : `Preparing ${progress.total} file${progress.total === 1 ? "" : "s"}…`}
+        </span>
+        <div className="progress-header-actions">
+          <span className="progress-percent">{Math.round(progressPercent)}%</span>
+          {converting && (
+            <button
+              type="button"
+              className="secondary progress-cancel"
+              onClick={cancelBatch}
+            >
+              Cancel
+            </button>
+          )}
+        </div>
+      </div>
+      <div
+        className="progress-bar"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(progressPercent)}
+      >
+        <div
+          className="progress-bar-fill"
+          style={{ width: `${progressPercent}%` }}
+        />
+      </div>
+    </section>
+  ) : null;
 
   return (
     <main className={`app${isMacos ? " app-macos" : ""}${isWindows ? " app-windows" : ""}`}>
@@ -1008,296 +1095,271 @@ function App() {
       )}
       {activeTab === "convert" && (
         <div className="tab-panel tab-panel-convert" role="tabpanel">
-          <section className="destination-row">
-            <span className="label">Destination</span>
-            <div className="destination-options" role="radiogroup" aria-label="Output destination">
-              <label className="destination-option">
-                <input
-                  type="radio"
-                  name="destination"
-                  value="local"
-                  checked={destination === "local"}
-                  disabled={converting}
-                  onChange={() => setDestination("local")}
-                />
-                Save locally
-              </label>
-              <label className="destination-option">
-                <input
-                  type="radio"
-                  name="destination"
-                  value="businessmap"
-                  checked={destination === "businessmap"}
-                  disabled={converting}
-                  onChange={() => setDestination("businessmap")}
-                />
-                Post to BusinessMap
-              </label>
-            </div>
-          </section>
-
-          {destination === "local" ? (
-            <section className="dir-row">
-              <div className="dir-info">
-                <span className="label">Save to</span>
-                <span className="dir-path" title={outputDir || undefined}>
-                  {outputDir || "No folder selected"}
-                </span>
+          <section className={`destination-row${convertLockedClass}`}>
+              <span className="label">Destination</span>
+              <div className="destination-options" role="radiogroup" aria-label="Output destination">
+                <label className="destination-option">
+                  <input
+                    type="radio"
+                    name="destination"
+                    value="local"
+                    checked={destination === "local"}
+                    disabled={converting}
+                    onChange={() => setDestination("local")}
+                  />
+                  Save locally
+                </label>
+                <label className="destination-option">
+                  <input
+                    type="radio"
+                    name="destination"
+                    value="businessmap"
+                    checked={destination === "businessmap"}
+                    disabled={converting}
+                    onChange={() => setDestination("businessmap")}
+                  />
+                  Post to BusinessMap
+                </label>
               </div>
-              <button type="button" onClick={chooseOutputDir} disabled={converting}>
-                Change…
-              </button>
             </section>
-          ) : (
-            <section
-              className={`card-url-row${showCardTargetHint ? " card-url-row-attention" : ""}`}
-              aria-describedby={showCardTargetHint ? "card-target-hint" : undefined}
-            >
-              <div className="card-url-field">
-                <div
-                  className={`card-url-combo card-url-combo-board${showCardTargetHint && missingBoardId ? " field-missing" : ""}`}
-                >
-                  <label htmlFor="board-input" className="card-url-prefix">Board</label>
-                  <input
-                    id="board-input"
-                    type="text"
-                    inputMode="numeric"
-                    className="card-url-input card-url-input-board"
-                    placeholder="99"
-                    value={boardId}
-                    disabled={converting}
-                    aria-invalid={showCardTargetHint && missingBoardId}
-                    onChange={(event) => handleBoardInput(event.target.value)}
-                  />
+
+            {destination === "local" ? (
+              <section className={`dir-row${convertLockedClass}`}>
+                <div className="dir-info">
+                  <span className="label">Save to</span>
+                  <span className="dir-path" title={outputDir || undefined}>
+                    {outputDir || "No folder selected"}
+                  </span>
                 </div>
-                <div
-                  className={`card-url-combo card-url-combo-card${showCardTargetHint && missingCardId ? " field-missing" : ""}`}
-                >
-                  <label htmlFor="card-input" className="card-url-prefix">Card</label>
-                  <input
-                    id="card-input"
-                    type="text"
-                    inputMode="numeric"
-                    className="card-url-input card-url-input-card"
-                    placeholder="402794"
-                    value={cardId}
-                    disabled={converting}
-                    aria-invalid={showCardTargetHint && missingCardId}
-                    onChange={(event) => handleCardInput(event.target.value)}
-                  />
-                </div>
-              </div>
-              {showCardTargetHint ? (
-                <p className="field-hint field-hint-error" id="card-target-hint" role="status">
-                  {missingBoardId && missingCardId
-                    ? "Board and card IDs are required to post."
-                    : missingBoardId
-                      ? "Board ID is required to post."
-                      : "Card ID is required to post."}
-                </p>
-              ) : cardPreviewUrl ? (
-                <button
-                  type="button"
-                  className="linkish card-url-preview"
-                  title="Open card in browser"
-                  onClick={() => {
-                    openUrl(cardPreviewUrl).catch(console.error);
-                  }}
-                >
-                  {cardPreviewUrl}
+                <button type="button" onClick={chooseOutputDir} disabled={converting}>
+                  Change…
                 </button>
-              ) : (
-                <span className="pref-hint">
-                  Enter board and card IDs to preview the card URL.
-                </span>
-              )}
-            </section>
-          )}
-
-          <section
-            className={`dropzone ${dropActive ? "dropzone-active" : ""}`}
-            aria-label={
-              destination === "businessmap"
-                ? "Drop video or image files here"
-                : "Drop video files here"
-            }
-          >
-            <p className="dropzone-title">
-              {destination === "businessmap"
-                ? "Drag & drop videos or images here"
-                : "Drag & drop videos here"}
-            </p>
-            <p className="dropzone-hint">{dropzoneHint}</p>
-            <button type="button" className="secondary" onClick={addFiles}>
-              Add files…
-            </button>
-          </section>
-
-          {notice && <p className="notice">{notice}</p>}
-
-          {lastCardLink && (
-            <p className="notice notice-ok">
-              <button
-                type="button"
-                className="linkish"
-                onClick={() => {
-                  openUrl(lastCardLink).catch(console.error);
-                }}
-              >
-                Open card comments in browser
-              </button>
-            </p>
-          )}
-
-          {progress?.active && (
-            <section className="progress-panel" aria-live="polite">
-              <div className="progress-header">
-                <span className="progress-label">
-                  {progress.fileName
-                    ? destination === "businessmap"
-                      ? `Processing ${progress.current + 1} of ${progress.total}: ${progress.fileName}`
-                      : `Converting ${progress.current + 1} of ${progress.total}: ${progress.fileName}`
-                    : `Preparing ${progress.total} file${progress.total === 1 ? "" : "s"}…`}
-                </span>
-                <span className="progress-percent">{Math.round(progressPercent)}%</span>
-              </div>
-              <div
-                className="progress-bar"
-                role="progressbar"
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={Math.round(progressPercent)}
-              >
-                <div
-                  className="progress-bar-fill"
-                  style={{ width: `${progressPercent}%` }}
-                />
-              </div>
-            </section>
-          )}
-
-          <section className="queue">
-            <div className="queue-header">
-              <h2>
-                Queue{" "}
-                <span className="count">
-                  {queue.length === 0
-                    ? "empty"
-                    : `${doneCount}/${queue.length} done`}
-                </span>
-              </h2>
-              <button
-                type="button"
-                className="secondary"
-                onClick={clearQueue}
-                disabled={queue.length === 0}
-              >
-                Clear
-              </button>
-            </div>
-
-            {queue.length === 0 ? (
-              <p className="empty">No files yet.</p>
+              </section>
             ) : (
-              <ul className="queue-list">
-                {queue.map((item) => (
-                  <li key={item.path} className={`queue-item status-${item.status}`}>
-                    <div className="queue-item-header">
-                      <span className="queue-name" title={item.path}>
-                        {item.name}
-                      </span>
-                      <div className="queue-item-toolbar">
-                        {isQueueItemFormatEditable(item) && (
-                          <select
-                            className="queue-format-select"
-                            aria-label={`Output format for ${item.name}`}
-                            value={item.outputFormat ?? "gif"}
-                            disabled={converting}
-                            onChange={(event) => {
-                              updateItemOutputFormat(
-                                item.path,
-                                event.target.value as VideoOutputFormat,
-                              );
-                            }}
-                          >
-                            <option value="gif">GIF</option>
-                            <option value="mov">MOV</option>
-                            <option value="mp4">MP4</option>
-                            <option value="webm">WEBM</option>
-                          </select>
-                        )}
-                        {shouldShowQueueStatusBadge(item) && (
-                          <span className={`queue-status-badge status-${item.status}`}>
-                            {getQueueStatusLabel(item)}
-                          </span>
-                        )}
-                        {canRemoveQueueItem(item, converting) && (
-                          <button
-                            type="button"
-                            className="queue-remove"
-                            aria-label={`Remove ${item.name}`}
-                            onClick={() => removeItem(item.path)}
-                          >
-                            <svg
-                              xmlns="http://www.w3.org/2000/svg"
-                              viewBox="0 0 24 24"
-                              width="14"
-                              height="14"
-                              fill="currentColor"
-                              aria-hidden="true"
-                            >
-                              <path d="M11.9997 10.5865L16.9495 5.63672L18.3637 7.05093L13.4139 12.0007L18.3637 16.9504L16.9495 18.3646L11.9997 13.4149L7.04996 18.3646L5.63574 16.9504L10.5855 12.0007L5.63574 7.05093L7.04996 5.63672L11.9997 10.5865Z" />
-                            </svg>
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                    {item.status === "converting" && item.filePercent != null && (
-                      <div
-                        className="queue-progress-bar"
-                        role="progressbar"
-                        aria-valuemin={0}
-                        aria-valuemax={100}
-                        aria-valuenow={Math.round(item.filePercent)}
-                        aria-label={`${item.name} progress`}
-                      >
-                        <div
-                          className="queue-progress-fill"
-                          style={{ width: `${item.filePercent}%` }}
-                        />
-                      </div>
-                    )}
-                    {item.error && <p className="queue-error">{item.error}</p>}
-                    {item.outputPath && (
-                      <p className="queue-out" title={item.outputPath}>
-                        → {fileName(item.outputPath)}
-                      </p>
-                    )}
-                  </li>
-                ))}
-              </ul>
+              <section
+                className={`card-url-row${showCardTargetHint ? " card-url-row-attention" : ""}${convertLockedClass}`}
+                aria-describedby={showCardTargetHint ? "card-target-hint" : undefined}
+              >
+                <div className="card-url-field">
+                  <div
+                    className={`card-url-combo card-url-combo-board${showCardTargetHint && missingBoardId ? " field-missing" : ""}`}
+                  >
+                    <label htmlFor="board-input" className="card-url-prefix">Board</label>
+                    <input
+                      id="board-input"
+                      type="text"
+                      inputMode="numeric"
+                      className="card-url-input card-url-input-board"
+                      placeholder="99"
+                      value={boardId}
+                      disabled={converting}
+                      aria-invalid={showCardTargetHint && missingBoardId}
+                      onChange={(event) => handleBoardInput(event.target.value)}
+                    />
+                  </div>
+                  <div
+                    className={`card-url-combo card-url-combo-card${showCardTargetHint && missingCardId ? " field-missing" : ""}`}
+                  >
+                    <label htmlFor="card-input" className="card-url-prefix">Card</label>
+                    <input
+                      id="card-input"
+                      type="text"
+                      inputMode="numeric"
+                      className="card-url-input card-url-input-card"
+                      placeholder="402794"
+                      value={cardId}
+                      disabled={converting}
+                      aria-invalid={showCardTargetHint && missingCardId}
+                      onChange={(event) => handleCardInput(event.target.value)}
+                    />
+                  </div>
+                </div>
+                {showCardTargetHint ? (
+                  <p className="field-hint field-hint-error" id="card-target-hint" role="status">
+                    {missingBoardId && missingCardId
+                      ? "Board and card IDs are required to post."
+                      : missingBoardId
+                        ? "Board ID is required to post."
+                        : "Card ID is required to post."}
+                  </p>
+                ) : cardPreviewUrl ? (
+                  <button
+                    type="button"
+                    className="linkish card-url-preview"
+                    title="Open card in browser"
+                    onClick={() => {
+                      openUrl(cardPreviewUrl).catch(console.error);
+                    }}
+                  >
+                    {cardPreviewUrl}
+                  </button>
+                ) : (
+                  <span className="pref-hint">
+                    Enter board and card IDs to preview the card URL.
+                  </span>
+                )}
+              </section>
             )}
-          </section>
 
-          <footer className="actions">
-            <button
-              type="button"
-              className="primary"
-              onClick={convert}
-              disabled={!canConvert}
-              title={convertBlockedReason ?? undefined}
-              aria-describedby={
-                convertBlockedReason ? "convert-blocked-hint" : undefined
+            <section
+              className={`dropzone ${dropActive ? "dropzone-active" : ""}${convertLockedClass}`}
+              aria-label={
+                destination === "businessmap"
+                  ? "Drop video or image files here"
+                  : "Drop video files here"
               }
             >
-              {convertButtonLabel}
-            </button>
-            {convertBlockedReason && (
-              <p className="actions-hint" id="convert-blocked-hint" role="status">
-                {convertBlockedReason}
+              <p className="dropzone-title">
+                {destination === "businessmap"
+                  ? "Drag & drop videos or images here"
+                  : "Drag & drop videos here"}
+              </p>
+              <p className="dropzone-hint">{dropzoneHint}</p>
+              <button type="button" className="secondary" onClick={addFiles} disabled={converting}>
+                Add files…
+              </button>
+            </section>
+
+            {notice && <p className={`notice${convertLockedClass}`}>{notice}</p>}
+
+            {lastCardLink && (
+              <p className={`notice notice-ok${convertLockedClass}`}>
+                <button
+                  type="button"
+                  className="linkish"
+                  onClick={() => {
+                    openUrl(lastCardLink).catch(console.error);
+                  }}
+                >
+                  Open card comments in browser
+                </button>
               </p>
             )}
-          </footer>
+
+            {progressPanel}
+
+            <section className={`queue`}>
+              <div className="queue-header">
+                <h2>
+                  Queue{" "}
+                  <span className="count">
+                    {queue.length === 0
+                      ? "empty"
+                      : `${doneCount}/${queue.length} done`}
+                  </span>
+                </h2>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={clearQueue}
+                  disabled={queue.length === 0 || converting}
+                >
+                  Clear
+                </button>
+              </div>
+
+              {queue.length === 0 ? (
+                <p className="empty">No files yet.</p>
+              ) : (
+                <ul className="queue-list">
+                  {queue.map((item) => (
+                    <li key={item.path} className={`queue-item status-${item.status}`}>
+                      <div className="queue-item-header">
+                        <span className="queue-name" title={item.path}>
+                          {item.name}
+                        </span>
+                        <div className="queue-item-toolbar">
+                          {isQueueItemFormatEditable(item) && (
+                            <select
+                              className="queue-format-select"
+                              aria-label={`Output format for ${item.name}`}
+                              value={item.outputFormat ?? "gif"}
+                              disabled={converting}
+                              onChange={(event) => {
+                                updateItemOutputFormat(
+                                  item.path,
+                                  event.target.value as VideoOutputFormat,
+                                );
+                              }}
+                            >
+                              <option value="gif">GIF</option>
+                              <option value="mov">MOV</option>
+                              <option value="mp4">MP4</option>
+                              <option value="webm">WEBM</option>
+                            </select>
+                          )}
+                          {shouldShowQueueStatusBadge(item) && (
+                            <span className={`queue-status-badge status-${item.status}`}>
+                              {getQueueStatusLabel(item)}
+                            </span>
+                          )}
+                          {canRemoveQueueItem(item, converting) && (
+                            <button
+                              type="button"
+                              className="queue-remove"
+                              aria-label={`Remove ${item.name}`}
+                              onClick={() => removeItem(item.path)}
+                            >
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                viewBox="0 0 24 24"
+                                width="14"
+                                height="14"
+                                fill="currentColor"
+                                aria-hidden="true"
+                              >
+                                <path d="M11.9997 10.5865L16.9495 5.63672L18.3637 7.05093L13.4139 12.0007L18.3637 16.9504L16.9495 18.3646L11.9997 13.4149L7.04996 18.3646L5.63574 16.9504L10.5855 12.0007L5.63574 7.05093L7.04996 5.63672L11.9997 10.5865Z" />
+                              </svg>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {item.status === "converting" && item.filePercent != null && (
+                        <div
+                          className="queue-progress-bar"
+                          role="progressbar"
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={Math.round(item.filePercent)}
+                          aria-label={`${item.name} progress`}
+                        >
+                          <div
+                            className="queue-progress-fill"
+                            style={{ width: `${item.filePercent}%` }}
+                          />
+                        </div>
+                      )}
+                      {item.error && <p className="queue-error">{item.error}</p>}
+                      {item.outputPath && (
+                        <p className="queue-out" title={item.outputPath}>
+                          → {fileName(item.outputPath)}
+                        </p>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            <footer className={`actions${convertLockedClass}`}>
+              <button
+                type="button"
+                className="primary"
+                onClick={convert}
+                disabled={!canConvert}
+                title={convertBlockedReason ?? undefined}
+                aria-describedby={
+                  convertBlockedReason ? "convert-blocked-hint" : undefined
+                }
+              >
+                {convertButtonLabel}
+              </button>
+              {convertBlockedReason && (
+                <p className="actions-hint" id="convert-blocked-hint" role="status">
+                  {convertBlockedReason}
+                </p>
+              )}
+            </footer>
         </div>
       )}
 

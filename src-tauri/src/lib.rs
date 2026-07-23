@@ -1,12 +1,16 @@
 mod businessmap;
 mod images;
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod tray_progress;
+
 use businessmap::BusinessmapConfig;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,6 +20,45 @@ use tauri_plugin_shell::ShellExt;
 const TOOL_UNAVAILABLE: &str =
     "Bundled ffmpeg is unavailable. Reinstall the app or contact support.";
 const VIDEO_MAX_BYTES: u64 = 25 * 1024 * 1024;
+const CANCELLED_ERROR: &str = "Cancelled";
+
+struct BatchRunState {
+    cancel_requested: AtomicBool,
+    active_ffmpeg: Mutex<Option<Child>>,
+}
+
+impl BatchRunState {
+    fn new() -> Self {
+        Self {
+            cancel_requested: AtomicBool::new(false),
+            active_ffmpeg: Mutex::new(None),
+        }
+    }
+
+    fn reset(&self) {
+        self.cancel_requested.store(false, Ordering::SeqCst);
+        *self
+            .active_ffmpeg
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    fn request_cancel(&self) {
+        self.cancel_requested.store(true, Ordering::SeqCst);
+        if let Some(mut child) = self
+            .active_ffmpeg
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            let _ = child.kill();
+        }
+    }
+
+    fn is_cancel_requested(&self) -> bool {
+        self.cancel_requested.load(Ordering::SeqCst)
+    }
+}
 
 struct ToolPaths {
     ffmpeg: PathBuf,
@@ -148,6 +191,8 @@ struct ConvertBatchFinished {
     card_id: Option<u64>,
     card_url: Option<String>,
     comment_error: Option<String>,
+    cancelled: bool,
+    skipped: usize,
 }
 
 #[derive(Clone, Serialize)]
@@ -319,6 +364,14 @@ fn parse_progress_value(line: &str) -> Option<f64> {
 
 fn emit_progress(app: Option<&AppHandle>, payload: ConvertProgress) {
     if let Some(app) = app {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        tray_progress::set_tray_progress(
+            app,
+            payload.index,
+            payload.total,
+            payload.file_percent,
+            &payload.name,
+        );
         let _ = app.emit("convert-progress", payload);
     }
 }
@@ -326,6 +379,7 @@ fn emit_progress(app: Option<&AppHandle>, payload: ConvertProgress) {
 fn run_ffmpeg_with_progress(
     tools: &ToolPaths,
     app: Option<&AppHandle>,
+    batch_state: Option<&BatchRunState>,
     input_path: &str,
     output_path: &str,
     filter: &str,
@@ -336,6 +390,7 @@ fn run_ffmpeg_with_progress(
     run_ffmpeg_args_with_progress(
         tools,
         app,
+        batch_state,
         input_path,
         output_path,
         index,
@@ -348,9 +403,32 @@ fn run_ffmpeg_with_progress(
     )
 }
 
+fn clear_active_ffmpeg(batch_state: Option<&BatchRunState>) {
+    if let Some(state) = batch_state {
+        *state
+            .active_ffmpeg
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+fn kill_active_ffmpeg(batch_state: Option<&BatchRunState>) {
+    if let Some(state) = batch_state {
+        if let Some(mut child) = state
+            .active_ffmpeg
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            let _ = child.kill();
+        }
+    }
+}
+
 fn run_ffmpeg_args_with_progress(
     tools: &ToolPaths,
     app: Option<&AppHandle>,
+    batch_state: Option<&BatchRunState>,
     input_path: &str,
     output_path: &str,
     index: usize,
@@ -358,6 +436,10 @@ fn run_ffmpeg_args_with_progress(
     name: &str,
     encode_args: &[String],
 ) -> Result<(), String> {
+    if batch_state.is_some_and(BatchRunState::is_cancel_requested) {
+        return Err(CANCELLED_ERROR.to_string());
+    }
+
     let mut args = vec![
         "-y".to_string(),
         "-i".to_string(),
@@ -393,52 +475,102 @@ fn run_ffmpeg_args_with_progress(
     }
 
     let stdout = child.stdout.take().ok_or("Failed to capture ffmpeg stdout")?;
-    let reader = BufReader::new(stdout);
+    let mut reader = BufReader::new(stdout);
+
+    let mut owned_child = if batch_state.is_some() {
+        if let Some(state) = batch_state {
+            *state
+                .active_ffmpeg
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(child);
+        }
+        None
+    } else {
+        Some(child)
+    };
 
     let duration_secs = probe_duration_secs(tools, input_path);
     let mut last_emit = Instant::now() - Duration::from_millis(500);
     let mut last_percent = -1.0f64;
 
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("Failed to read ffmpeg progress: {e}"))?;
+    loop {
+        if batch_state.is_some_and(BatchRunState::is_cancel_requested) {
+            kill_active_ffmpeg(batch_state);
+            clear_active_ffmpeg(batch_state);
+            return Err(CANCELLED_ERROR.to_string());
+        }
 
-        if line.starts_with("out_time_ms=") {
-            let out_time_ms = parse_progress_value(&line).unwrap_or(0.0);
-            let file_percent = duration_secs
-                .map(|duration| {
-                    let out_secs = out_time_ms / 1_000_000.0;
-                    ((out_secs / duration) * 100.0).clamp(0.0, 99.0)
-                })
-                .unwrap_or(-1.0);
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                if line.starts_with("out_time_ms=") {
+                    let out_time_ms = parse_progress_value(&line).unwrap_or(0.0);
+                    let file_percent = duration_secs
+                        .map(|duration| {
+                            let out_secs = out_time_ms / 1_000_000.0;
+                            ((out_secs / duration) * 100.0).clamp(0.0, 99.0)
+                        })
+                        .unwrap_or(-1.0);
 
-            let should_emit = file_percent < 0.0
-                || (file_percent - last_percent).abs() >= 1.0
-                || last_emit.elapsed() >= Duration::from_millis(150);
+                    let should_emit = file_percent < 0.0
+                        || (file_percent - last_percent).abs() >= 1.0
+                        || last_emit.elapsed() >= Duration::from_millis(150);
 
-            if should_emit {
-                emit_progress(
-                    app,
-                    ConvertProgress {
-                        index,
-                        total,
-                        name: name.to_string(),
-                        path: input_path.to_string(),
-                        file_percent: if file_percent < 0.0 {
-                            0.0
-                        } else {
-                            file_percent
-                        },
-                    },
-                );
-                last_percent = file_percent;
-                last_emit = Instant::now();
+                    if should_emit {
+                        emit_progress(
+                            app,
+                            ConvertProgress {
+                                index,
+                                total,
+                                name: name.to_string(),
+                                path: input_path.to_string(),
+                                file_percent: if file_percent < 0.0 {
+                                    0.0
+                                } else {
+                                    file_percent
+                                },
+                            },
+                        );
+                        last_percent = file_percent;
+                        last_emit = Instant::now();
+                    }
+                }
+            }
+            Err(error) => {
+                if batch_state.is_some_and(BatchRunState::is_cancel_requested) {
+                    kill_active_ffmpeg(batch_state);
+                    clear_active_ffmpeg(batch_state);
+                    return Err(CANCELLED_ERROR.to_string());
+                }
+                return Err(format!("Failed to read ffmpeg progress: {error}"));
             }
         }
     }
 
+    let mut child = if let Some(child) = owned_child.take() {
+        child
+    } else {
+        batch_state
+            .and_then(|state| {
+                state
+                    .active_ffmpeg
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+            })
+            .ok_or_else(|| "Lost ffmpeg process handle".to_string())?
+    };
+
     let status = child
         .wait()
         .map_err(|e| format!("Failed to wait for ffmpeg: {e}"))?;
+
+    clear_active_ffmpeg(batch_state);
+
+    if batch_state.is_some_and(BatchRunState::is_cancel_requested) {
+        return Err(CANCELLED_ERROR.to_string());
+    }
 
     if status.success() {
         emit_progress(
@@ -538,6 +670,7 @@ fn build_video_encode_args(
 fn convert_video_to_output(
     tools: &ToolPaths,
     app: Option<&AppHandle>,
+    batch_state: Option<&BatchRunState>,
     input_path: &str,
     output_path: &Path,
     format: VideoOutputFormat,
@@ -553,6 +686,7 @@ fn convert_video_to_output(
     run_ffmpeg_args_with_progress(
         tools,
         app,
+        batch_state,
         input_path,
         &output_path_str,
         index,
@@ -565,6 +699,7 @@ fn convert_video_to_output(
 fn ensure_output_under_limit(
     tools: &ToolPaths,
     app: Option<&AppHandle>,
+    batch_state: Option<&BatchRunState>,
     input_path: &str,
     output_path: &Path,
     format: VideoOutputFormat,
@@ -612,6 +747,7 @@ fn ensure_output_under_limit(
             run_ffmpeg_with_progress(
                 tools,
                 app,
+                batch_state,
                 input_path,
                 &output_path.to_string_lossy(),
                 &filter,
@@ -623,6 +759,7 @@ fn ensure_output_under_limit(
             convert_video_to_output(
                 tools,
                 app,
+                batch_state,
                 input_path,
                 output_path,
                 format,
@@ -645,8 +782,65 @@ fn ensure_output_under_limit(
     Ok(())
 }
 
+fn emit_cancelled_file_finished(
+    app: &AppHandle,
+    index: usize,
+    total: usize,
+    path: &str,
+    name: &str,
+    output_path: Option<String>,
+) {
+    let result = ConvertResult {
+        name: name.to_string(),
+        ok: false,
+        error: Some(CANCELLED_ERROR.to_string()),
+        output_path,
+    };
+    emit_file_finished(app, index, total, path, &result);
+}
+
+fn upload_to_businessmap_cancellable(
+    state: &BatchRunState,
+    config: &BusinessmapConfig,
+    file_name: &str,
+    mime_type: &str,
+    bytes: Vec<u8>,
+) -> Result<Option<String>, String> {
+    if state.is_cancel_requested() {
+        return Ok(None);
+    }
+
+    let config = config.clone();
+    let file_name = file_name.to_string();
+    let mime_type = mime_type.to_string();
+    let handle = thread::spawn(move || {
+        businessmap::upload_file(
+            &config.base_url,
+            &config.api_key,
+            &file_name,
+            &bytes,
+            &mime_type,
+        )
+    });
+
+    loop {
+        if state.is_cancel_requested() {
+            return Ok(None);
+        }
+        if handle.is_finished() {
+            return match handle.join() {
+                Ok(Ok(link)) => Ok(Some(link)),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err("Upload thread panicked".to_string()),
+            };
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn convert_videos_inner(
     app: AppHandle,
+    batch_state: Arc<BatchRunState>,
     tools: Option<ToolPaths>,
     items: Vec<ConvertItem>,
     output_dir: PathBuf,
@@ -657,6 +851,8 @@ fn convert_videos_inner(
     let total = items.len();
     let mut ok_count = 0usize;
     let mut failed_count = 0usize;
+    let mut skipped = 0usize;
+    let mut cancelled = false;
     let mut batch_attachments: Vec<BatchAttachment> = Vec::new();
     let mut batch_upload_names: Vec<String> = Vec::new();
 
@@ -681,8 +877,16 @@ fn convert_videos_inner(
         "convert-batch-started",
         ConvertBatchStarted { total },
     );
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    tray_progress::set_tray_progress(&app, 0, total, 0.0, "Starting…");
 
     for (index, item) in items.into_iter().enumerate() {
+        if batch_state.is_cancel_requested() {
+            skipped = total - index;
+            cancelled = true;
+            break;
+        }
+
         let path_str = item.path;
         let output_format = item.output_format;
         let input = PathBuf::from(&path_str);
@@ -726,16 +930,19 @@ fn convert_videos_inner(
                             path: path_str.clone(),
                         },
                     );
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    tray_progress::set_tray_progress(&app, index, total, 92.0, &name);
 
                     match images::prepare_image_for_upload(&input) {
                         Ok((bytes, upload_name, mime_type)) => {
-                            match upload_to_businessmap(
+                            match upload_to_businessmap_cancellable(
+                                &batch_state,
                                 bm_config.as_ref().expect("BusinessMap config"),
                                 &upload_name,
                                 mime_type,
-                                &bytes,
+                                bytes,
                             ) {
-                                Ok(link) => {
+                                Ok(Some(link)) => {
                                     ok_count += 1;
                                     batch_upload_names.push(upload_name.clone());
                                     batch_attachments.push(BatchAttachment {
@@ -749,6 +956,20 @@ fn convert_videos_inner(
                                         output_path: None,
                                     };
                                     emit_file_finished(&app, index, total, &path_str, &result);
+                                }
+                                Ok(None) => {
+                                    failed_count += 1;
+                                    emit_cancelled_file_finished(
+                                        &app,
+                                        index,
+                                        total,
+                                        &path_str,
+                                        &name,
+                                        None,
+                                    );
+                                    skipped = total - index - 1;
+                                    cancelled = true;
+                                    break;
                                 }
                                 Err(error) => {
                                     failed_count += 1;
@@ -838,6 +1059,7 @@ fn convert_videos_inner(
             run_ffmpeg_with_progress(
                 tools,
                 Some(&app),
+                Some(&batch_state),
                 &path_str,
                 &output_path_str,
                 &build_gif_filter(&config),
@@ -849,6 +1071,7 @@ fn convert_videos_inner(
             convert_video_to_output(
                 tools,
                 Some(&app),
+                Some(&batch_state),
                 &path_str,
                 &output_path,
                 output_format,
@@ -864,6 +1087,7 @@ fn convert_videos_inner(
             ensure_output_under_limit(
                 tools,
                 Some(&app),
+                Some(&batch_state),
                 &path_str,
                 &output_path,
                 output_format,
@@ -876,6 +1100,22 @@ fn convert_videos_inner(
 
         match convert_result {
             Ok(()) if destination == ConvertDestination::Businessmap => {
+                if batch_state.is_cancel_requested() {
+                    failed_count += 1;
+                    emit_cancelled_file_finished(
+                        &app,
+                        index,
+                        total,
+                        &path_str,
+                        &name,
+                        Some(output_path_str.clone()),
+                    );
+                    cleanup_temp_gif(&output_path);
+                    skipped = total - index - 1;
+                    cancelled = true;
+                    break;
+                }
+
                 let bm = bm_config.as_ref().expect("BusinessMap config");
                 let upload_name = output_path
                     .file_name()
@@ -892,20 +1132,23 @@ fn convert_videos_inner(
                         path: path_str.clone(),
                     },
                 );
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                tray_progress::set_tray_progress(&app, index, total, 92.0, &name);
 
                 let upload_result = fs::read(&output_path)
                     .map_err(|e| format!("Failed to read converted file: {e}"))
                     .and_then(|bytes| {
-                        upload_to_businessmap(
+                        upload_to_businessmap_cancellable(
+                            &batch_state,
                             bm,
                             &upload_name,
                             output_mime_type(output_format),
-                            &bytes,
+                            bytes,
                         )
                     });
 
                 match upload_result {
-                    Ok(link) => {
+                    Ok(Some(link)) => {
                         cleanup_temp_gif(&output_path);
                         ok_count += 1;
                         batch_upload_names.push(upload_name.clone());
@@ -920,6 +1163,21 @@ fn convert_videos_inner(
                             output_path: None,
                         };
                         emit_file_finished(&app, index, total, &path_str, &result);
+                    }
+                    Ok(None) => {
+                        cleanup_temp_gif(&output_path);
+                        failed_count += 1;
+                        emit_cancelled_file_finished(
+                            &app,
+                            index,
+                            total,
+                            &path_str,
+                            &name,
+                            None,
+                        );
+                        skipped = total - index - 1;
+                        cancelled = true;
+                        break;
                     }
                     Err(error) => {
                         failed_count += 1;
@@ -948,10 +1206,15 @@ fn convert_videos_inner(
                 let result = ConvertResult {
                     name: name.clone(),
                     ok: false,
-                    error: Some(error),
+                    error: Some(error.clone()),
                     output_path: None,
                 };
                 emit_file_finished(&app, index, total, &path_str, &result);
+                if error == CANCELLED_ERROR {
+                    skipped = total - index - 1;
+                    cancelled = true;
+                    break;
+                }
             }
         }
     }
@@ -996,23 +1259,17 @@ fn convert_videos_inner(
             card_id,
             card_url,
             comment_error,
+            cancelled,
+            skipped,
         },
     );
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    tray_progress::reset_tray_progress(&app);
 }
 
-fn upload_to_businessmap(
-    config: &BusinessmapConfig,
-    file_name: &str,
-    mime_type: &str,
-    bytes: &[u8],
-) -> Result<String, String> {
-    businessmap::upload_file(
-        &config.base_url,
-        &config.api_key,
-        file_name,
-        bytes,
-        mime_type,
-    )
+#[tauri::command]
+fn cancel_convert_batch(batch_state: tauri::State<'_, Arc<BatchRunState>>) {
+    batch_state.request_cancel();
 }
 
 fn cleanup_temp_gif(gif_path: &Path) {
@@ -1073,6 +1330,7 @@ fn test_businessmap_connection(base_url: String, api_key: String) -> Result<Stri
 #[tauri::command]
 async fn convert_videos(
     app: AppHandle,
+    batch_state: tauri::State<'_, Arc<BatchRunState>>,
     items: Vec<ConvertItem>,
     output_dir: Option<String>,
     destination: ConvertDestination,
@@ -1084,6 +1342,8 @@ async fn convert_videos(
     if items.is_empty() {
         return Err("No files to convert".to_string());
     }
+
+    batch_state.reset();
 
     let out_dir = match destination {
         ConvertDestination::Local => {
@@ -1114,9 +1374,11 @@ async fn convert_videos(
         None
     };
     let bm_options = businessmap;
+    let batch_state = Arc::clone(&batch_state);
     tauri::async_runtime::spawn_blocking(move || {
         convert_videos_inner(
             app,
+            batch_state,
             tools,
             items,
             out_dir,
@@ -1317,6 +1579,14 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         inner.set_show_menu_on_right_click(true);
     })?;
 
+    let (base_rgba, width, height) = tray_progress::decode_base_icon();
+    app.manage(tray_progress::TrayProgress::new(
+        tray,
+        base_rgba,
+        width,
+        height,
+    ));
+
     Ok(())
 }
 
@@ -1329,6 +1599,8 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             use tauri::Manager;
+
+            app.manage(Arc::new(BatchRunState::new()));
 
             if let Some(window) = app.get_webview_window("main") {
                 configure_platform_window(&window)?;
@@ -1351,6 +1623,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             check_ffmpeg,
             convert_videos,
+            cancel_convert_batch,
             test_businessmap_connection
         ])
         .build(tauri::generate_context!())
@@ -1428,6 +1701,46 @@ mod tests {
     }
 
     #[test]
+    fn batch_skipped_count_for_cancelled_batch() {
+        assert_eq!(batch_skipped_count(5, 2, false), 3);
+        assert_eq!(batch_skipped_count(5, 2, true), 2);
+    }
+
+    #[test]
+    fn convert_batch_finished_includes_cancel_fields() {
+        let payload = ConvertBatchFinished {
+            ok: 1,
+            failed: 1,
+            destination: "local".to_string(),
+            card_id: None,
+            card_url: None,
+            comment_error: None,
+            cancelled: true,
+            skipped: 2,
+        };
+        let json = serde_json::to_value(&payload).expect("serialize batch finished");
+        assert_eq!(json["cancelled"], true);
+        assert_eq!(json["skipped"], 2);
+    }
+
+    #[test]
+    fn batch_run_state_reset_clears_cancel_flag() {
+        let state = BatchRunState::new();
+        state.request_cancel();
+        assert!(state.is_cancel_requested());
+        state.reset();
+        assert!(!state.is_cancel_requested());
+    }
+
+    fn batch_skipped_count(total: usize, index: usize, current_started: bool) -> usize {
+        if current_started {
+            total.saturating_sub(index + 1)
+        } else {
+            total.saturating_sub(index)
+        }
+    }
+
+    #[test]
     fn convert_sample_mp4_to_gif() {
         let dir = std::env::temp_dir().join("evidence-cvt-unit");
         let out = dir.join("out");
@@ -1458,6 +1771,7 @@ mod tests {
         };
         run_ffmpeg_with_progress(
             &tools,
+            None,
             None,
             input.to_str().unwrap(),
             output_path.to_str().unwrap(),

@@ -177,6 +177,14 @@ html.platform-windows body {
   overflow: hidden;
 }
 
+.convert-locked {
+  filter: blur(1px);
+  opacity: 0.75;
+  pointer-events: none;
+  user-select: none;
+  transition: filter 0.2s ease, opacity 0.2s ease;
+}
+
 .tab-panel-convert > .destination-row,
 .tab-panel-convert > .dir-row,
 .tab-panel-convert > .card-url-row,
@@ -471,10 +479,22 @@ html.platform-windows body {
 
 .progress-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
   margin-bottom: var(--space-2);
+}
+
+.progress-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.progress-cancel {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.72rem;
 }
 
 .progress-label {
