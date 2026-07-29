@@ -4,7 +4,9 @@ A lightweight menu bar / system tray app for turning screen recordings and evide
 
 Built with [Tauri](https://tauri.app/), React, and TypeScript. FFmpeg is bundled in release builds, so teammates can install and run without extra setup.
 
-![Evidence GIF Converter on macOS](docs/macos-screenshot.png)
+| Convertion | Preferences |
+| ---------- | ----------- | 
+| ![Evidence GIF Converter on macOS](docs/convert-tab.png) | ![Evidence GIF Converter on macOS](docs/preferences-tab.png) |
 
 ## Why I built this
 
