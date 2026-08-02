@@ -1,26 +1,40 @@
-# Evidence GIF Converter
+# Evidence Converter
 
-A lightweight menu bar / system tray app for turning screen recordings and evidence videos into optimized GIFs — then posting them to a [BusinessMap](https://businessmap.io) card or saving them locally for use elsewhere (e.g. Azure PRs).
+A desktop productivity tool for converting development evidence and publishing it directly to BusinessMap cards.
 
-Built with [Tauri](https://tauri.app/), React, and TypeScript. FFmpeg is bundled in release builds, so teammates can install and run without extra setup.
+It was created to remove a recurring workflow bottleneck: screen recordings captured as `.mov` or `.mp4` often needed to be manually converted before they could be viewed inline in delivery cards or pull requests.
+
+Evidence Converter turns that multi-step process into a single workflow:
+
+1. Drop screenshots or recordings into the app.
+2. Convert and optimize the files.
+3. Publish them to a BusinessMap card or save them locally.
+
+Built with Tauri, React, TypeScript, Rust, and FFmpeg. Release builds bundle FFmpeg, so teammates can install and use the app without configuring external dependencies.
 
 | Convertion | Preferences |
-| ---------- | ----------- | 
-| ![Evidence GIF Converter on macOS](docs/convert-tab.png) | ![Evidence GIF Converter on macOS](docs/preferences-tab.png) |
+| ---------- | ----------- |
+| ![Evidence Converter on macOS](docs/convert-tab.png) | ![Evidence Converter on macOS](docs/preferences-tab.png) |
 
-## Why I built this
+## Why I built it
 
 I built this tool to make it easier to attach evidence to **BusinessMap** cards and **Azure DevOps pull requests**. A recurring part of my workflow was capturing many screenshots and screen recordings — and whenever a video was `.mov` or `.mp4`, I still had to convert it to GIF so it would render inline in BusinessMap comments instead of forcing people to download and open a file.
 
 On macOS the app lives in the **menu bar**. Drop your files, and it converts and posts to BusinessMap in one step. You can also **save locally** when you only need the GIF for another purpose (for example, pasting into an Azure PR description).
 
-> Uma ferramenta que desenvolvi para facilitar o envio de evidências nos cards do Business Map e também em PRs da Azure.
-> Era uma dor recorrente minha ter que gerar várias imagens e vídeos de evidência e, quando os vídeos estavam em .mov ou .mp4, ainda precisar convertê-los para GIF para que ficassem fáceis de visualizar nos comentários do Business Map.
-> No macOS, a ferramenta roda na barra de menus (system tray). Basta arrastar e soltar os arquivos que ela faz a conversão automaticamente e publica diretamente no Business Map. Também é possível salvar os arquivos localmente, caso a conversão seja para outro uso.
+## What this project demonstrates
 
-## What it does
+- Identifying and automating a recurring developer workflow
+- Building and distributing a cross-platform desktop application
+- Integrating with an external REST API for file uploads and card comments
+- Managing native processes and bundled FFmpeg sidecars through Tauri
+- Designing batch-processing, progress, error, and persistence flows
+- Automating macOS and Windows releases through GitHub Actions
+- Human-directed, AI-assisted product and software development
 
-Evidence GIF Converter is a productivity tool for QA, support, and engineering workflows where you capture `.mov` or `.mp4` screen recordings and need a small, shareable GIF quickly.
+## Product highlights
+
+Evidence Converter is a productivity tool for QA, support, and engineering workflows where you capture `.mov` or `.mp4` screen recordings and need a small, shareable GIF quickly.
 
 **Convert tab**
 
@@ -38,7 +52,7 @@ Evidence GIF Converter is a productivity tool for QA, support, and engineering w
 - Configure BusinessMap: base URL, API key (from *My Account → API*), and a comment template (`{filename}` placeholder supported).
 - **Test connection** verifies your API key before you post.
 
-## How to use
+## Usage
 
 1. **Launch the app** — it lives in the menu bar (macOS) or system tray (Windows). Click the icon to open the panel; right-click (or Ctrl+click on macOS) for **Quit**.
 2. **Choose a destination**
@@ -59,7 +73,7 @@ Default GIF settings are 10 fps, 480 px width, and 128 colors. Adjust them in **
 
 Each batch posts a **single BusinessMap comment** with all attachments from that run. The comment template `{filename}` lists every file name in the batch.
 
-## Install (teammates)
+## Installation
 
 Download the latest installers from **[GitHub Releases](../../releases)** — same pattern as projects like [Reactotron](https://github.com/infinitered/reactotron/releases). Pick the asset for your platform under **Assets**. No Homebrew, ffmpeg, or PATH setup required.
 
@@ -78,7 +92,7 @@ If macOS blocks the app after install, remove the download quarantine flag and o
 xattr -cr "/Applications/Evidence Converter.app"
 ```
 
-### Publish a new release (maintainers)
+### Publishing a release
 
 1. Bump the version (updates `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`):
 
@@ -115,7 +129,7 @@ bun run download-ffmpeg:all
 
 Sidecar binaries live in `src-tauri/binaries/` and are not committed to git.
 
-## Release builds (maintainers)
+## Local release builds
 
 ### macOS `.dmg`
 
@@ -161,6 +175,12 @@ Ready-to-share copies are also written to `dist/releases/` when you run the buil
 - **Video**: FFmpeg / FFprobe (bundled via sidecars in release builds)
 - **Integrations**: BusinessMap REST API (file upload + card comments)
 - **Persistence**: Tauri Store plugin (output folder, FFmpeg settings, API key)
+
+## AI-assisted development
+
+This project was built through an AI-assisted, human-in-the-loop engineering workflow.
+
+AI tools supported product exploration, implementation, debugging, documentation, and release automation. Product decisions, architecture, integration design, testing, validation, and final quality remained under human ownership.
 
 ## Third-party licenses
 
