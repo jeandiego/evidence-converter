@@ -231,6 +231,43 @@ html.platform-windows body {
   font-size: 0.74rem;
 }
 
+.banner-update {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  background: rgba(91, 141, 239, 0.12);
+  border: 1px solid rgba(91, 141, 239, 0.35);
+  color: var(--text);
+}
+
+.banner-update-text {
+  flex: 1;
+  min-width: 10rem;
+}
+
+.banner-update-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.banner-update-btn {
+  padding: 0.28rem 0.7rem;
+  font-size: 0.74rem;
+}
+
+.pref-version {
+  margin: 0 0 var(--space-2);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.pref-version strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .dir-row {
   display: flex;
   align-items: center;
@@ -1114,6 +1151,11 @@ html.platform-macos .banner-error {
 html.platform-macos .banner-ok {
   background: rgba(61, 154, 106, 0.2);
   border-color: rgba(61, 154, 106, 0.34);
+}
+
+html.platform-macos .banner-update {
+  background: rgba(91, 141, 239, 0.18);
+  border-color: rgba(91, 141, 239, 0.35);
 }
 
 html.platform-windows .tab-active {

@@ -84,6 +84,8 @@ Download the latest installers from **[GitHub Releases](../../releases)** — sa
 
 The app runs from the menu bar / tray and does not appear in the Dock on macOS.
 
+After the first install, the app checks [GitHub Releases](../../releases) for updates on launch. When a newer version is available, it shows an **Install** / **Later** prompt. You can also check from **Preferences → Updates** or the tray menu (**Check for Updates…**).
+
 ### macOS: “app is damaged” message
 
 If macOS blocks the app after install, remove the download quarantine flag and open it again:
@@ -93,6 +95,24 @@ xattr -cr "/Applications/Evidence Converter.app"
 ```
 
 ### Publishing a release
+
+Updater builds are signed. One-time setup (if you have not already):
+
+1. Generate a keypair (keys live in `.tauri-keys/`, which is gitignored):
+
+```bash
+bunx tauri signer generate -w .tauri-keys/evidence-cvt.key --ci -p ""
+```
+
+2. Put the **public** key contents into `src-tauri/tauri.conf.json` → `plugins.updater.pubkey` (already set for this repo’s keypair).
+
+3. Add repository secrets on GitHub:
+   - `TAURI_SIGNING_PRIVATE_KEY` — full contents of `.tauri-keys/evidence-cvt.key`
+   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — password if you set one (use an empty value if not)
+
+Keep the private key secret. If it is lost, you must generate a new keypair, ship a new public key in the app, and have users install that build once before in-app updates work again.
+
+Then publish as usual:
 
 1. Bump the version (updates `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`):
 
@@ -104,7 +124,7 @@ bun run bump 1.0.0    # set exact version
 
 2. Commit, tag, and push (the bump script prints the exact commands).
 
-3. GitHub Actions builds macOS and Windows installers and attaches them to the release (workflow: `.github/workflows/release.yml`).
+3. GitHub Actions builds macOS and Windows installers, signs updater artifacts, and attaches them (including `latest.json`) to the release (workflow: `.github/workflows/release.yml`).
 
 You can also trigger a build manually from the **Actions** tab → **Release** → **Run workflow**.
 

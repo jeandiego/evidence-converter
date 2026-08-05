@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { Store } from "@tauri-apps/plugin-store";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import {
   hideAppWindow,
   initPlatformWindow,
@@ -98,6 +101,7 @@ const BM_API_KEY = "businessmapApiKey";
 const BM_BASE_URL_KEY = "businessmapBaseUrl";
 const BM_BOARD_ID_KEY = "businessmapBoardId";
 const BM_COMMENT_TEMPLATE_KEY = "businessmapCommentTemplate";
+const SKIPPED_UPDATE_VERSION_KEY = "skippedUpdateVersion";
 const DEFAULT_BM_BASE_URL = "https://dasa.businessmap.io";
 const DEFAULT_BM_COMMENT_TEMPLATE = "{filename}";
 const VIDEO_EXT = /\.(mov|mp4)$/i;
@@ -330,6 +334,13 @@ function App() {
   const [bmTestMessage, setBmTestMessage] = useState<string | null>(null);
   const [bmTesting, setBmTesting] = useState(false);
   const [lastCardLink, setLastCardLink] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState("");
+  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+  const [skippedUpdateVersion, setSkippedUpdateVersion] = useState<string | null>(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateInstalling, setUpdateInstalling] = useState(false);
+  const [updateDownloadPercent, setUpdateDownloadPercent] = useState<number | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<string | null>(null);
 
   const filterPreview = useMemo(
     () => buildGifFilterPreview(ffmpegConfig),
@@ -352,14 +363,16 @@ function App() {
     let cancelled = false;
 
     async function init() {
-      const [ffmpegStatus, settings] = await Promise.all([
+      const [ffmpegStatus, settings, version] = await Promise.all([
         invoke<FfmpegStatus>("check_ffmpeg"),
         Store.load(STORE_FILE),
+        getVersion(),
       ]);
       if (cancelled) return;
 
       setFfmpeg(ffmpegStatus);
       setStore(settings);
+      setAppVersion(version);
 
       const savedOutputDir = await settings.get<string>(OUTPUT_DIR_KEY);
       if (savedOutputDir) setOutputDir(savedOutputDir);
@@ -380,10 +393,24 @@ function App() {
       const savedBmBaseUrl = await settings.get<string>(BM_BASE_URL_KEY);
       const savedBmBoardId = await settings.get<string>(BM_BOARD_ID_KEY);
       const savedBmTemplate = await settings.get<string>(BM_COMMENT_TEMPLATE_KEY);
+      const savedSkippedUpdate = await settings.get<string>(SKIPPED_UPDATE_VERSION_KEY);
       if (savedBmApiKey) setBmApiKey(savedBmApiKey);
       if (savedBmBaseUrl) setBmBaseUrl(savedBmBaseUrl);
       if (savedBmBoardId) setBoardId(savedBmBoardId);
       if (savedBmTemplate) setBmCommentTemplate(savedBmTemplate);
+      if (savedSkippedUpdate) setSkippedUpdateVersion(savedSkippedUpdate);
+
+      if (!import.meta.env.DEV) {
+        try {
+          const update = await check();
+          if (cancelled) return;
+          if (update && update.version !== (savedSkippedUpdate ?? null)) {
+            setPendingUpdate(update);
+          }
+        } catch (err) {
+          console.error(err);
+        }
+      }
     }
 
     init().catch((err) => {
@@ -704,6 +731,104 @@ function App() {
     },
     [store],
   );
+
+  const checkForUpdates = useCallback(
+    async (options?: { silent?: boolean }) => {
+      const silent = options?.silent ?? false;
+      if (updateChecking || updateInstalling) return;
+
+      setUpdateChecking(true);
+      if (!silent) setUpdateStatus("Checking…");
+
+      try {
+        const update = await check();
+        if (update) {
+          if (silent && skippedUpdateVersion === update.version) {
+            setUpdateStatus(null);
+            return;
+          }
+          setPendingUpdate(update);
+          if (!silent) setUpdateStatus(`Update ${update.version} available.`);
+        } else {
+          setPendingUpdate(null);
+          if (!silent) setUpdateStatus("You're up to date.");
+        }
+      } catch (err) {
+        console.error(err);
+        if (!silent) setUpdateStatus(String(err));
+      } finally {
+        setUpdateChecking(false);
+      }
+    },
+    [skippedUpdateVersion, updateChecking, updateInstalling],
+  );
+
+  const dismissUpdate = useCallback(async () => {
+    if (pendingUpdate && store) {
+      await store.set(SKIPPED_UPDATE_VERSION_KEY, pendingUpdate.version);
+      await store.save();
+      setSkippedUpdateVersion(pendingUpdate.version);
+    }
+    setPendingUpdate(null);
+    setUpdateStatus(null);
+  }, [pendingUpdate, store]);
+
+  const installUpdate = useCallback(async () => {
+    if (!pendingUpdate || updateInstalling) return;
+
+    setUpdateInstalling(true);
+    setUpdateDownloadPercent(0);
+    setUpdateStatus("Downloading update…");
+
+    try {
+      let downloaded = 0;
+      let contentLength = 0;
+
+      await pendingUpdate.downloadAndInstall((event) => {
+        switch (event.event) {
+          case "Started":
+            contentLength = event.data.contentLength ?? 0;
+            break;
+          case "Progress":
+            downloaded += event.data.chunkLength;
+            if (contentLength > 0) {
+              setUpdateDownloadPercent(
+                Math.min(100, Math.round((downloaded / contentLength) * 100)),
+              );
+            }
+            break;
+          case "Finished":
+            setUpdateDownloadPercent(100);
+            setUpdateStatus("Installing…");
+            break;
+        }
+      });
+
+      setUpdateStatus("Restarting…");
+      await relaunch();
+    } catch (err) {
+      console.error(err);
+      setUpdateStatus(String(err));
+      setUpdateInstalling(false);
+      setUpdateDownloadPercent(null);
+    }
+  }, [pendingUpdate, updateInstalling]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    listen("check-for-updates", () => {
+      void checkForUpdates({ silent: false });
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(console.error);
+
+    return () => {
+      unlisten?.();
+    };
+  }, [checkForUpdates]);
 
   async function testBusinessmapConnection() {
     if (!bmApiKey.trim()) {
@@ -1091,6 +1216,44 @@ function App() {
       {ffmpeg && !ffmpeg.available && pendingHasVideos && (
         <div className="banner banner-error" role="alert">
           {ffmpeg.message}
+        </div>
+      )}
+      {pendingUpdate && !updateInstalling && (
+        <div className="banner banner-update" role="status">
+          <span className="banner-update-text">
+            Version {pendingUpdate.version} is available
+            {appVersion ? ` (you have ${appVersion})` : ""}.
+          </span>
+          <div className="banner-update-actions">
+            <button
+              type="button"
+              className="primary banner-update-btn"
+              onClick={() => {
+                void installUpdate();
+              }}
+              disabled={updateChecking}
+            >
+              Install
+            </button>
+            <button
+              type="button"
+              className="secondary banner-update-btn"
+              onClick={() => {
+                void dismissUpdate();
+              }}
+              disabled={updateChecking}
+            >
+              Later
+            </button>
+          </div>
+        </div>
+      )}
+      {updateInstalling && (
+        <div className="banner banner-update" role="status">
+          <span className="banner-update-text">
+            {updateStatus ?? "Downloading update…"}
+            {updateDownloadPercent != null ? ` ${updateDownloadPercent}%` : ""}
+          </span>
         </div>
       )}
       {activeTab === "convert" && (
@@ -1485,6 +1648,63 @@ function App() {
               {bmTestMessage && (
                 <p className={`pref-test ${bmTestMessage.startsWith("Connected") ? "pref-test-ok" : "pref-test-error"}`}>
                   {bmTestMessage}
+                </p>
+              )}
+            </div>
+          </section>
+
+          <section className="prefs">
+            <h2>Updates</h2>
+            <p className="prefs-intro">
+              Checks GitHub Releases for a newer build. You can also use Check for Updates… in the
+              tray menu.
+            </p>
+
+            <p className="pref-version">
+              Current version: <strong>{appVersion || "…"}</strong>
+            </p>
+
+            <div className="pref-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => {
+                  void checkForUpdates({ silent: false });
+                }}
+                disabled={converting || updateChecking || updateInstalling}
+              >
+                {updateChecking ? "Checking…" : "Check for updates"}
+              </button>
+              {pendingUpdate && !updateInstalling && (
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={() => {
+                    void installUpdate();
+                  }}
+                  disabled={updateChecking}
+                >
+                  Install {pendingUpdate.version}
+                </button>
+              )}
+              {updateStatus && (
+                <p
+                  className={`pref-test ${
+                    updateStatus.startsWith("You're up to date") ||
+                    updateStatus.startsWith("Update ")
+                      ? "pref-test-ok"
+                      : updateStatus.startsWith("Checking") ||
+                          updateStatus.startsWith("Downloading") ||
+                          updateStatus.startsWith("Installing") ||
+                          updateStatus.startsWith("Restarting")
+                        ? ""
+                        : "pref-test-error"
+                  }`}
+                >
+                  {updateStatus}
+                  {updateInstalling && updateDownloadPercent != null
+                    ? ` (${updateDownloadPercent}%)`
+                    : ""}
                 </p>
               )}
             </div>

@@ -281,8 +281,18 @@ fn build_gif_filter_with_overrides(width: u32, fps: u32, max_colors: u32) -> Str
     )
 }
 
+/// H.264 / VP9 (yuv420) require even width and height.
+fn even_dimension(n: u32) -> u32 {
+    (n & !1).max(2)
+}
+
 fn build_scale_fps_filter(fps: u32, width: u32) -> String {
-    format!("fps={},scale={}:-1:flags=lanczos", fps, width)
+    // `-2` keeps aspect ratio while forcing height divisible by 2 (libx264).
+    format!(
+        "fps={},scale={}:-2:flags=lanczos",
+        fps,
+        even_dimension(width)
+    )
 }
 
 fn output_extension(format: VideoOutputFormat) -> &'static str {
@@ -1508,8 +1518,15 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     };
 
+    let check_updates = MenuItem::with_id(
+        app,
+        "check-for-updates",
+        "Check for Updates…",
+        true,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&quit])?;
+    let menu = Menu::with_items(app, &[&check_updates, &quit])?;
 
     if let Some(window) = app.get_webview_window("main") {
         #[cfg(target_os = "macos")]
@@ -1534,6 +1551,9 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         .on_menu_event(|app, event| {
             if event.id() == "quit" {
                 app.exit(0);
+            } else if event.id() == "check-for-updates" {
+                toggle_tray_panel(app);
+                let _ = app.emit("check-for-updates", ());
             }
         })
         .on_tray_icon_event(|tray, event| {
@@ -1597,6 +1617,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             use tauri::Manager;
 
@@ -1655,6 +1677,75 @@ mod tests {
         assert!(filter.contains("fps=15"));
         assert!(filter.contains("scale=720:-1"));
         assert!(filter.contains("max_colors=64"));
+    }
+
+    #[test]
+    fn build_scale_fps_filter_forces_even_dimensions() {
+        assert_eq!(
+            build_scale_fps_filter(12, 1024),
+            "fps=12,scale=1024:-2:flags=lanczos"
+        );
+        // Odd widths must be rounded down so libx264 can encode.
+        assert_eq!(
+            build_scale_fps_filter(10, 721),
+            "fps=10,scale=720:-2:flags=lanczos"
+        );
+        assert_eq!(even_dimension(1), 2);
+        assert_eq!(even_dimension(611), 610);
+    }
+
+    #[test]
+    fn convert_odd_aspect_mp4_to_mp4() {
+        let dir = std::env::temp_dir().join("evidence-cvt-odd-aspect-mp4");
+        let out = dir.join("out");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&out).unwrap();
+
+        // 1280x764 → scale width 1024 yields height ~611 (odd) with scale=W:-1.
+        let input = dir.join("clip.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=0.5:size=1280x764:rate=15",
+                "-pix_fmt",
+                "yuv420p",
+                input.to_str().unwrap(),
+            ])
+            .status()
+            .expect("ffmpeg required for test");
+        assert!(status.success());
+
+        let config = FfmpegConfig {
+            fps: 12,
+            width: 1024,
+            max_colors: 128,
+        };
+        let output_path = out.join("clip.mp4");
+        let tools = ToolPaths {
+            ffmpeg: which::which("ffmpeg").expect("ffmpeg required for test"),
+            ffprobe: which::which("ffprobe").expect("ffprobe required for test"),
+        };
+        convert_video_to_output(
+            &tools,
+            None,
+            None,
+            input.to_str().unwrap(),
+            &output_path,
+            VideoOutputFormat::Mp4,
+            &config,
+            config.width,
+            28,
+            0,
+            1,
+            "clip.mp4",
+        )
+        .expect("mp4 conversion with odd computed height should succeed");
+
+        assert!(output_path.exists());
+        assert_eq!(output_path.extension().unwrap(), "mp4");
     }
 
     #[test]
